@@ -1285,6 +1285,7 @@ async function runWhisper(
     chunk_length_s: chunkLength,
     stride_length_s: stride,
     return_timestamps: "word" as const,
+    task: "transcribe" as const,
     // Anti-repetition: Whisper-base on multi-minute audio often falls into
     // loops like "little bit of a little bit of a…" near chunk boundaries
     // or silence. Keep penalty mild — 1.15 truncates multi-speaker clips
