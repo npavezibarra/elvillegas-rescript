@@ -2,7 +2,10 @@
 
 import type { FFmpeg } from "@ffmpeg/ffmpeg";
 import { en } from "@/lib/i18n/messages/en";
-import type { TimeRange } from "./types";
+import type { EditorLayer, TimeRange, Word } from "./types";
+import { serializeCaptionAss, serializeStaticTextAss } from "./captionsExport";
+import { originalToEdited } from "./edits";
+import { layerTiming } from "./layers";
 
 const CORE_BASE = "/vendor/ffmpeg";
 const INPUT_DIR = "/input";
@@ -161,6 +164,16 @@ export type AudioExportFormat = "m4a" | "mp3" | "wav";
 export interface VideoExportOptions {
   /** When false, render a silent video (source has no audio track). */
   withAudio?: boolean;
+  /** Burn word-highlighted captions into the exported video. */
+  burnCaptions?: boolean;
+  /** Caption words / cuts for burn-in. */
+  captions?: {
+    words: Word[];
+    cuts?: TimeRange[];
+    duration: number;
+  };
+  /** Visual text and image layers, ordered from back to front. */
+  layers?: EditorLayer[];
   format?: VideoExportFormat;
   resolution?: VideoExportResolution;
   aspectRatio?: VideoExportAspectRatio;
@@ -201,6 +214,31 @@ function cropFilter(width: number, height: number): string {
 
 function fitFilter(width: number, height: number): string {
   return `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`;
+}
+
+/** Output dimensions after export scaling / reframing. */
+export function getVideoExportDimensions(
+  resolution: VideoExportResolution,
+  aspectRatio: VideoExportAspectRatio,
+  sourceWidth = 1920,
+  sourceHeight = 1080
+): { width: number; height: number } {
+  const aspect = getVideoAspectRatioDimensions(
+    resolution,
+    aspectRatio,
+    sourceWidth,
+    sourceHeight
+  );
+  if (aspect) return aspect;
+
+  if (resolution === "original") {
+    return { width: Math.max(2, sourceWidth), height: Math.max(2, sourceHeight) };
+  }
+
+  const targetHeight = VIDEO_HEIGHT[resolution];
+  const height = Math.max(2, Math.min(sourceHeight, targetHeight));
+  const width = even((sourceWidth * height) / Math.max(1, sourceHeight));
+  return { width, height };
 }
 
 /** Compute the centered export size for a 16:9 or 9:16 render. */
@@ -256,6 +294,9 @@ export async function exportVideo(
   onProgress: (ratio: number) => void,
   {
     withAudio = true,
+    burnCaptions = false,
+    captions,
+    layers = [],
     format = "mp4",
     resolution = "original",
     aspectRatio = "original",
@@ -295,9 +336,90 @@ export async function exportVideo(
     `;${labels.join("")}concat=n=${keepRanges.length}:v=1:a=${
       withAudio ? 1 : 0
     }[outv]${withAudio ? "[outa]" : ""}`;
-  const videoMap = transform ? "[vout]" : "[outv]";
+  const captionDims = getVideoExportDimensions(
+    resolution,
+    aspectRatio,
+    sourceWidth,
+    sourceHeight
+  );
+  let videoMap = transform ? "[vout]" : "[outv]";
   if (transform) {
     filter += `;[outv]${transform}[vout]`;
+  }
+
+  const layerFiles: string[] = [];
+  const layerInputArgs: string[] = [];
+  let wroteLayers = false;
+  let layerSequence = 0;
+  let imageInputIndex = 1;
+  const layersToRender = layers.length > 0 ? layers : [];
+
+  // Older callers can still request captions without the layer model.
+  if (layersToRender.length === 0 && burnCaptions && captions?.words.length) {
+    const path = "/captions.ass";
+    const ass = serializeCaptionAss(captions.words, {
+      cuts: captions.cuts,
+      duration: captions.duration,
+      playResX: captionDims.width,
+      playResY: captionDims.height,
+    });
+    await ffmpeg.writeFile(path, new TextEncoder().encode(ass));
+    layerFiles.push(path);
+    filter += `;${videoMap}ass=filename=${path}:original_size=${captionDims.width}x${captionDims.height}[vl${layerSequence}]`;
+    videoMap = `[vl${layerSequence++}]`;
+    wroteLayers = true;
+  }
+
+  for (const layer of layersToRender) {
+    const sourceDuration = captions?.duration ?? editedDuration;
+    const originalTiming = layerTiming(layer, sourceDuration);
+    const layerStart = originalToEdited(originalTiming.start, captions?.cuts ?? []);
+    const layerEnd = originalToEdited(originalTiming.end, captions?.cuts ?? []);
+    if (layer.type === "text") {
+      if (layer.source === "caption" && (!burnCaptions || !captions?.words.length)) {
+        continue;
+      }
+      const path = `/layer-${layerSequence}.ass`;
+      const ass =
+        layer.source === "caption"
+          ? serializeCaptionAss(captions!.words, {
+              cuts: captions!.cuts,
+              duration: captions!.duration,
+              playResX: captionDims.width,
+              playResY: captionDims.height,
+              layer,
+              start: layerStart,
+              end: layerEnd,
+            })
+          : serializeStaticTextAss(
+              layer,
+              editedDuration,
+              captionDims.width,
+              captionDims.height,
+              layerStart,
+              layerEnd
+            );
+      await ffmpeg.writeFile(path, new TextEncoder().encode(ass));
+      layerFiles.push(path);
+      filter += `;${videoMap}ass=filename=${path}:original_size=${captionDims.width}x${captionDims.height}[vl${layerSequence}]`;
+      videoMap = `[vl${layerSequence++}]`;
+      wroteLayers = true;
+      continue;
+    }
+
+    const imagePath = `/layer-${layerSequence}${imageFileExtension(layer.src)}`;
+    await ffmpeg.writeFile(imagePath, dataUrlBytes(layer.src));
+    layerFiles.push(imagePath);
+    layerInputArgs.push("-loop", "1", "-framerate", "30", "-i", imagePath);
+    const width = even((layer.transform.width / 100) * captionDims.width);
+    const height = even((layer.transform.height / 100) * captionDims.height);
+    const x = Math.round((layer.transform.x / 100) * captionDims.width - width / 2);
+    const y = Math.round((layer.transform.y / 100) * captionDims.height - height / 2);
+    const imageLabel = `img${layerSequence}`;
+    filter += `;[${imageInputIndex}:v]format=rgba,scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black@0[${imageLabel}];${videoMap}[${imageLabel}]overlay=${x}:${y}:eof_action=repeat:enable='between(t,${layerStart.toFixed(3)},${layerEnd.toFixed(3)})'[vl${layerSequence}]`;
+    videoMap = `[vl${layerSequence++}]`;
+    imageInputIndex++;
+    wroteLayers = true;
   }
 
   const progressHandler = ({ time }: { progress: number; time: number }) => {
@@ -325,15 +447,40 @@ export async function exportVideo(
             "-movflags", "+faststart",
           ];
 
-    const code = await ffmpeg.exec([
-      "-i", input,
-      "-filter_complex", filter,
-      "-map", videoMap,
-      ...(withAudio ? ["-map", "[outa]"] : ["-an"]),
-      ...codecArgs,
-      "-y", out,
-    ]);
-    if (code !== 0) throw new Error(en["error.videoExport"]);
+    const runExport = async (
+      activeFilter: string,
+      activeMap: string,
+      extraInputs: string[] = []
+    ) => {
+      const code = await ffmpeg.exec([
+        "-i",
+        input,
+        ...extraInputs,
+        "-filter_complex",
+        activeFilter,
+        "-map",
+        activeMap,
+        ...(withAudio ? ["-map", "[outa]"] : ["-an"]),
+        ...codecArgs,
+        "-y",
+        out,
+      ]);
+      if (code !== 0) throw new Error(en["error.videoExport"]);
+    };
+
+    try {
+      await runExport(filter, videoMap, layerInputArgs);
+    } catch (err) {
+      if (!wroteLayers) throw err;
+      const fallbackFilter =
+        parts.join(";") +
+        `;${labels.join("")}concat=n=${keepRanges.length}:v=1:a=${
+          withAudio ? 1 : 0
+        }[outv]${withAudio ? "[outa]" : ""}` +
+        (transform ? `;[outv]${transform}[vout]` : "");
+      const fallbackMap = transform ? "[vout]" : "[outv]";
+      await runExport(fallbackFilter, fallbackMap);
+    }
     const data = (await ffmpeg.readFile(out)) as Uint8Array;
     await ffmpeg.deleteFile(out);
     const buf = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
@@ -342,7 +489,31 @@ export async function exportVideo(
     });
   } finally {
     ffmpeg.off("progress", progressHandler);
+    await Promise.all(
+      layerFiles.map(async (path) => {
+        try {
+          await ffmpeg.deleteFile(path);
+        } catch {
+          // Best effort cleanup for temporary layer assets.
+        }
+      })
+    );
   }
+}
+
+function dataUrlBytes(source: string): Uint8Array {
+  const match = /^data:[^;]+;base64,([\s\S]+)$/.exec(source);
+  if (!match) throw new Error("Image layer has an invalid source.");
+  const binary = atob(match[1]);
+  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+}
+
+function imageFileExtension(source: string): string {
+  const mime = /^data:([^;]+);base64,/i.exec(source)?.[1]?.toLowerCase();
+  if (mime === "image/jpeg") return ".jpg";
+  if (mime === "image/webp") return ".webp";
+  if (mime === "image/gif") return ".gif";
+  return ".png";
 }
 
 /**

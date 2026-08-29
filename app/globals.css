@@ -86,6 +86,44 @@ body {
   animation: tl-split-flash 0.42s ease-out;
 }
 
+/* Captions overlay: subtle entrance for the whole block and a brighter pop for
+   the active word, keeping the effect lively without feeling jumpy. */
+@keyframes caption-block-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.985);
+    filter: blur(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0);
+  }
+}
+@keyframes caption-word-pop {
+  0% {
+    transform: scale(0.96);
+    filter: brightness(0.98);
+  }
+  60% {
+    transform: scale(1.04);
+    filter: brightness(1.03);
+  }
+  100% {
+    transform: scale(1.03);
+    filter: brightness(1);
+  }
+}
+.caption-block {
+  animation: caption-block-in 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.caption-word {
+  transform-origin: center;
+}
+.caption-word-active {
+  animation: caption-word-pop 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
 /* Logo loader: bars slide behind the R silhouette that clips them */
 @keyframes logo-bar-slide {
   0%,
@@ -115,6 +153,10 @@ body {
 }
 @media (prefers-reduced-motion: reduce) {
   .logo-bar {
+    animation: none;
+  }
+  .caption-block,
+  .caption-word-active {
     animation: none;
   }
 }

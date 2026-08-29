@@ -3,7 +3,10 @@
 import { create } from "zustand";
 import type {
   EditSnapshot,
+  EditorLayer,
   EditorStatus,
+  LayerTransform,
+  TextLayerStyle,
   ManualCut,
   ProgressInfo,
   SceneBoundary,
@@ -65,12 +68,28 @@ import {
   replaceSpeaker as replaceSpeakerEntry,
   speakersFromWords,
 } from "./speakers";
+import {
+  CAPTION_LAYER_ID,
+  clampLayerTransform,
+  createCaptionLayer,
+  layerTiming,
+  moveLayer,
+  withLayerTiming,
+} from "./layers";
 
 interface PendingTranscript {
   name: string;
   words: Word[];
   speakers?: SpeakerInfo[];
 }
+
+export interface CaptionPosition {
+  /** Center point as a percentage of the video frame. */
+  x: number;
+  y: number;
+}
+
+const DEFAULT_CAPTION_POSITION: CaptionPosition = { x: 50, y: 82 };
 
 interface EditorState {
   // Media
@@ -152,6 +171,11 @@ interface EditorState {
   exportOpen: boolean;
   exportPreviewAspectRatio: VideoExportAspectRatio | null;
   exportPreviewLayout: VideoExportLayout;
+  showCaptions: boolean;
+  captionPosition: CaptionPosition;
+  /** Bottom-to-top visual stack rendered over the video frame. */
+  layers: EditorLayer[];
+  selectedLayerId: string | null;
   aiClipSuggestions: ClipSuggestion[];
   aiClipPreviewRange: TimeRange | null;
   /** Coarse-grained product phase used to route between top-level windows. */
@@ -260,6 +284,19 @@ interface EditorState {
   setExportOpen: (open: boolean) => void;
   setExportPreviewAspectRatio: (ratio: VideoExportAspectRatio | null) => void;
   setExportPreviewLayout: (layout: VideoExportLayout) => void;
+  setShowCaptions: (showCaptions: boolean) => void;
+  setCaptionPosition: (position: CaptionPosition) => void;
+  addTextLayer: (text?: string) => string;
+  addImageLayer: (src: string, name?: string) => string;
+  updateLayerTransform: (id: string, transform: Partial<LayerTransform>) => void;
+  updateLayerTiming: (id: string, timing: Partial<{ start: number; end: number }>) => void;
+  updateTextLayer: (
+    id: string,
+    update: { text?: string; style?: Partial<TextLayerStyle> }
+  ) => void;
+  removeLayer: (id: string) => void;
+  moveLayerToIndex: (id: string, index: number) => void;
+  setSelectedLayerId: (id: string | null) => void;
   setWorkspaceScreen: (screen: WorkspaceScreen) => void;
   setAiClipSuggestions: (suggestions: ClipSuggestion[]) => void;
   clearAiClipSuggestions: () => void;
@@ -419,6 +456,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   exportOpen: false,
   exportPreviewAspectRatio: null,
   exportPreviewLayout: "fill",
+  showCaptions: true,
+  captionPosition: DEFAULT_CAPTION_POSITION,
+  layers: [createCaptionLayer(DEFAULT_CAPTION_POSITION)],
+  selectedLayerId: null,
   aiClipSuggestions: [],
   aiClipPreviewRange: null,
   projectPhase: "idle",
@@ -472,6 +513,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       duration: 0,
       exportPreviewAspectRatio: null,
       exportPreviewLayout: "fill",
+      showCaptions: true,
+      captionPosition: DEFAULT_CAPTION_POSITION,
+      layers: [createCaptionLayer(DEFAULT_CAPTION_POSITION)],
+      selectedLayerId: null,
       aiClipSuggestions: [],
       aiClipPreviewRange: null,
       workspaceScreen: "projects",
@@ -494,6 +539,17 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const manualCuts = record.manualCuts ?? [];
     const sceneBoundaries = record.sceneBoundaries ?? [];
     const speakers = speakersFromWords(record.words, record.speakers ?? []);
+    const layers = (
+      record.layers && record.layers.length > 0
+        ? record.layers
+        : [createCaptionLayer(record.captionPosition, record.duration)]
+    ).map((layer) => withLayerTiming(layer, record.duration));
+    const storedCaptionLayer = layers.find(
+      (layer) => layer.id === CAPTION_LAYER_ID
+    );
+    const captionPosition = storedCaptionLayer
+      ? { x: storedCaptionLayer.transform.x, y: storedCaptionLayer.transform.y }
+      : record.captionPosition ?? DEFAULT_CAPTION_POSITION;
     set(
       withWorkflow(get(), {
       videoFile: file,
@@ -529,6 +585,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       exportOpen: false,
       exportPreviewAspectRatio: null,
       exportPreviewLayout: "fill",
+      showCaptions: true,
+      captionPosition,
+      layers,
+      selectedLayerId: null,
       aiClipSuggestions: record.aiClipSuggestions ?? [],
       aiClipPreviewRange: null,
       waveform: null,
@@ -559,7 +619,14 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
   setPendingTranscript: (pendingTranscript) => set({ pendingTranscript }),
   setDuration: (duration) => {
-    set({ duration });
+    set((s) => ({
+      duration,
+      layers: s.layers.map((layer) =>
+        layer.end === undefined || (s.duration === 0 && layer.end === 0)
+          ? { ...layer, start: layer.start ?? 0, end: duration }
+          : layer
+      ),
+    }));
     if (get().status === "ready") bumpAutosave();
   },
   setAudio: (audio) =>
@@ -1158,6 +1225,149 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set({ exportPreviewAspectRatio }),
   setExportPreviewLayout: (exportPreviewLayout) =>
     set({ exportPreviewLayout }),
+  setShowCaptions: (showCaptions) => set({ showCaptions }),
+  setCaptionPosition: (captionPosition) => {
+    set((s) => ({
+      captionPosition,
+      layers: s.layers.map((layer) =>
+        layer.id === CAPTION_LAYER_ID
+          ? {
+              ...layer,
+              transform: clampLayerTransform(captionPosition, layer.transform),
+            }
+          : layer
+      ),
+    }));
+    bumpAutosave();
+  },
+  addTextLayer: (text = "Text") => {
+    const id = crypto.randomUUID();
+    set((s) => ({
+      layers: [
+        ...s.layers,
+        {
+          id,
+          name: "Text",
+          type: "text",
+          source: "static",
+          text,
+          style: {
+            color: "#ffffff",
+            fontFamily: "Arial",
+            fontSize: 36,
+            fontWeight: 700,
+            textAlign: "center",
+            lineHeight: 1.15,
+            dropShadow: true,
+          },
+          transform: { x: 50, y: 50, width: 42, height: 16 },
+          start: Math.min(s.currentTime, s.duration),
+          end: s.duration,
+        },
+      ],
+      selectedLayerId: id,
+    }));
+    bumpAutosave();
+    return id;
+  },
+  addImageLayer: (src, name = "Image") => {
+    const id = crypto.randomUUID();
+    set((s) => ({
+      layers: [
+        ...s.layers,
+        {
+          id,
+          name,
+          type: "image",
+          src,
+          transform: { x: 50, y: 50, width: 35, height: 35 },
+          start: Math.min(s.currentTime, s.duration),
+          end: s.duration,
+        },
+      ],
+      selectedLayerId: id,
+    }));
+    bumpAutosave();
+    return id;
+  },
+  updateLayerTransform: (id, transform) => {
+    set((s) => {
+      const current = s.layers.find((layer) => layer.id === id);
+      if (!current) return {};
+      const nextTransform = clampLayerTransform(transform, current.transform);
+      return {
+        layers: s.layers.map((layer) =>
+          layer.id === id ? { ...layer, transform: nextTransform } : layer
+        ),
+        ...(id === CAPTION_LAYER_ID
+          ? { captionPosition: { x: nextTransform.x, y: nextTransform.y } }
+          : {}),
+      };
+    });
+    bumpAutosave();
+  },
+  updateLayerTiming: (id, timing) => {
+    set((s) => ({
+      layers: s.layers.map((layer) => {
+        if (layer.id !== id) return layer;
+        const current = layerTiming(layer, s.duration);
+        const minLength = Math.min(0.05, s.duration);
+        const start = Math.max(
+          0,
+          Math.min(
+            timing.start ?? current.start,
+            (timing.end ?? current.end) - minLength
+          )
+        );
+        const end = Math.min(
+          s.duration,
+          Math.max(timing.end ?? current.end, start + minLength)
+        );
+        return { ...layer, start, end };
+      }),
+    }));
+    bumpAutosave();
+  },
+  updateTextLayer: (id, update) => {
+    set((s) => ({
+      layers: s.layers.map((layer) => {
+        if (layer.id !== id || layer.type !== "text") return layer;
+        return {
+          ...layer,
+          ...(update.text !== undefined ? { text: update.text } : {}),
+          ...(update.style
+            ? {
+                style: {
+                  color: "#ffffff",
+                  fontFamily: "Arial",
+                  fontSize: 32,
+                  fontWeight: 800,
+                  textAlign: "center",
+                  lineHeight: 1.08,
+                  dropShadow: true,
+                  ...layer.style,
+                  ...update.style,
+                },
+              }
+            : {}),
+        };
+      }),
+    }));
+    bumpAutosave();
+  },
+  removeLayer: (id) => {
+    if (id === CAPTION_LAYER_ID) return;
+    set((s) => ({
+      layers: s.layers.filter((layer) => layer.id !== id),
+      selectedLayerId: s.selectedLayerId === id ? null : s.selectedLayerId,
+    }));
+    bumpAutosave();
+  },
+  moveLayerToIndex: (id, index) => {
+    set((s) => ({ layers: moveLayer(s.layers, id, index) }));
+    bumpAutosave();
+  },
+  setSelectedLayerId: (selectedLayerId) => set({ selectedLayerId }),
   setWorkspaceScreen: (workspaceScreen) => set({ workspaceScreen }),
   setAiClipSuggestions: (aiClipSuggestions) =>
     set((s) => {
@@ -1225,6 +1435,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       exportOpen: false,
       exportPreviewAspectRatio: null,
       exportPreviewLayout: "fill",
+      showCaptions: true,
+      captionPosition: DEFAULT_CAPTION_POSITION,
+      layers: [createCaptionLayer(DEFAULT_CAPTION_POSITION)],
+      selectedLayerId: null,
       aiClipSuggestions: [],
       aiClipPreviewRange: null,
       projectPhase: "idle",

@@ -14,7 +14,7 @@ import {
 } from "./languages";
 import type { MediaKind } from "./media";
 import type { ClipSuggestion } from "./aiClips";
-import type { ManualCut, SceneBoundary, SpeakerInfo, Word } from "./types";
+import type { EditorLayer, ManualCut, SceneBoundary, SpeakerInfo, Word } from "./types";
 
 const DB_NAME = "rescript-projects";
 const DB_VERSION = 1;
@@ -44,6 +44,10 @@ function projectSource(row: {
 export interface ProjectRecord extends ProjectMeta {
   words: Word[];
   showDeleted: boolean;
+  /** Center point for the caption layer, stored as frame percentages. */
+  captionPosition?: { x: number; y: number };
+  /** Visual layers; optional so projects saved before layers remain compatible. */
+  layers?: EditorLayer[];
   /** AI-generated clip suggestions for the project (optional for older saves). */
   aiClipSuggestions?: ClipSuggestion[];
   /** Blade/trim cuts not owned by deleted words (optional for older saves). */
@@ -189,6 +193,8 @@ export async function putProject(input: ProjectWrite): Promise<string> {
       : DEFAULT_TRANSCRIPT_LANGUAGE,
     words: input.words,
     showDeleted: input.showDeleted,
+    captionPosition: input.captionPosition,
+    layers: input.layers ?? [],
     aiClipSuggestions: input.aiClipSuggestions ?? [],
     manualCuts: input.manualCuts ?? [],
     sceneBoundaries: input.sceneBoundaries ?? [],

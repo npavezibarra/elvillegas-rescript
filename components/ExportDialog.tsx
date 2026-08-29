@@ -97,6 +97,8 @@ export default function ExportDialog() {
   const setExportPreviewLayout = useEditorStore(
     (s) => s.setExportPreviewLayout
   );
+  const showCaptions = useEditorStore((s) => s.showCaptions);
+  const layers = useEditorStore((s) => s.layers);
   const videoFile = useEditorStore((s) => s.videoFile);
   const mediaKind = useEditorStore((s) => s.mediaKind);
   const duration = useEditorStore((s) => s.duration);
@@ -289,6 +291,15 @@ export default function ExportDialog() {
             })
           : await exportVideo(videoFile, keeps, editedDuration, setProgress, {
               withAudio: hasAudioTrack,
+              burnCaptions: hasWords && showCaptions,
+              captions: hasWords
+                ? {
+                    words,
+                    cuts: exportCuts,
+                    duration,
+                  }
+                : undefined,
+              layers,
               format: videoFormat,
               resolution,
               aspectRatio,
@@ -322,13 +333,19 @@ export default function ExportDialog() {
     activeTab,
     isAudioProject,
     hasAudioTrack,
+    hasWords,
     keeps,
     editedDuration,
+    words,
+    exportCuts,
+    duration,
     audioFormat,
     videoFormat,
     resolution,
     aspectRatio,
     exportPreviewLayout,
+    showCaptions,
+    layers,
     videoEl,
     setStatus,
     setExportUrl,

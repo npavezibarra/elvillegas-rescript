@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { Group, Panel, Separator, useDefaultLayout } from "react-resizable-panels";
 import { useEditorStore } from "@/lib/store";
 import { getCutRanges, isWordCutOut } from "@/lib/edits";
@@ -24,7 +24,6 @@ import MediaPreview from "./MediaPreview";
 import Timeline from "./Timeline";
 import ExportDialog from "./ExportDialog";
 import { Download, Redo2, Undo2 } from "lucide-react";
-import LogoLoader from "./LogoLoader";
 import SettingsMenu from "./SettingsMenu";
 import ModelSelector, {
   LanguageSection,
@@ -36,11 +35,6 @@ import { MODEL_ORDER } from "@/lib/models";
 import { isTypingTarget } from "@/lib/keyboard";
 import { en } from "@/lib/i18n/messages/en";
 import { useI18n } from "./I18nProvider";
-
-/** How long the desktop mode-change overlay stays up. Matches the macOS
- *  `setBounds(..., animate)` duration plus a small buffer so the layout
- *  underneath isn't revealed mid-resize. */
-const WINDOW_MODE_OVERLAY_MS = 380;
 
 /** Transcript and preview split, resizable in both orientations. Wide screens
  *  put the transcript first (left of the preview); stacked screens lead with
@@ -152,9 +146,6 @@ export default function Editor() {
   const { locale } = useI18n();
   const isSpanish = locale === "es";
 
-  const [modeTransitioning, setModeTransitioning] = useState(false);
-  const wasIdle = useRef(status === "idle");
-
   // File › Open Project… reaches the same picker the upload screen uses, from
   // anywhere in the app.
   const menuInputRef = useRef<HTMLInputElement>(null);
@@ -223,25 +214,38 @@ export default function Editor() {
     if (!videoFile || startedFor.current === videoFile) return;
     startedFor.current = videoFile;
     const restoreOnly = useEditorStore.getState().skipTranscription;
+    let cancelled = false;
     (async () => {
       const s = useEditorStore.getState();
       try {
-        s.setProgress({ message: en["progress.loadingMediaEngine"], value: null });
+        if (restoreOnly) {
+          // Restored projects already have words, so we can show the editor
+          // immediately and let waveform extraction finish in the background.
+          s.setStatus("ready");
+          s.setProgress({ message: "", value: null });
+        } else {
+          s.setProgress({ message: en["progress.loadingMediaEngine"], value: null });
+        }
         await getFFmpeg();
+        if (cancelled) return;
         s.setProgress({ message: en["progress.extractingAudio"], value: null });
         const audio = await extractAudio(videoFile);
+        if (cancelled) return;
         s.setAudio(audio);
         // ffmpeg's gigabyte is pure overhead from here until the user exports,
         // and holding it through model instantiation is what makes WebKit kill
         // the tab. Export re-initialises it lazily from the HTTP cache.
         await releaseFFmpeg();
-        if (restoreOnly || !audio) {
+        if (!restoreOnly && !audio) {
           s.setStatus("ready");
           s.setProgress({ message: "", value: null });
-        } else {
+          return;
+        }
+        if (!restoreOnly && audio) {
           transcribe(audio, audio.length / VAD_SAMPLE_RATE);
         }
       } catch (err) {
+        if (cancelled) return;
         console.error("Processing pipeline failed:", err);
         // Same reasoning as the worker's error path: a dropped connection while
         // pulling the media engine is the user's network, not a bug, and
@@ -256,20 +260,18 @@ export default function Editor() {
         );
       }
     })();
+    return () => {
+      cancelled = true;
+    };
   }, [videoFile, skipTranscription, transcribe]);
 
   // The desktop shell opens as a small upload window and grows once the
-  // three-pane editor takes over (and shrinks back on "start over").
-  // Cover the swap with a brief overlay so the layout reflow isn't visible
-  // while the window animates between sizes.
+  // three-pane editor takes over (and shrinks back on "start over"). Keep
+  // the editor interactive while the native window resizes: an overlay here
+  // can remain above the app if Electron misses an animation completion.
   useEffect(() => {
     const idle = status === "idle";
     window.rescriptDesktop?.setWindowMode(idle ? "compact" : "expanded");
-    if (!isElectron || wasIdle.current === idle) return;
-    wasIdle.current = idle;
-    setModeTransitioning(true);
-    const timer = window.setTimeout(() => setModeTransitioning(false), WINDOW_MODE_OVERLAY_MS);
-    return () => window.clearTimeout(timer);
   }, [status]);
 
   // Global shortcuts: space = play/pause, ⌘Z / ⇧⌘Z = undo / redo, S = split,
@@ -444,15 +446,6 @@ export default function Editor() {
           </TopBar>}
           <ProjectsScreen onFile={loadVideo} />
         </>
-      )}
-      {modeTransitioning && (
-        <div
-          className="absolute inset-0 z-50 flex items-center justify-center bg-zinc-50 dark:bg-zinc-950"
-          aria-busy="true"
-          aria-live="polite"
-        >
-          <LogoLoader size={44} />
-        </div>
       )}
       {isElectron && (
         // Present in the layout tree (not display:none) so the native menu's

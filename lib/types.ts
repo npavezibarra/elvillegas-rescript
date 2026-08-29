@@ -82,6 +82,50 @@ export interface ProgressInfo {
   value: number | null;
 }
 
+/** Position and size expressed as percentages of the video frame. */
+export interface LayerTransform {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+interface LayerBase {
+  id: string;
+  name: string;
+  transform: LayerTransform;
+  /** Original-media timing. Optional only for projects saved before timeline layers. */
+  start?: number;
+  end?: number;
+}
+
+export interface TextLayerStyle {
+  color: string;
+  fontFamily: string;
+  fontSize: number;
+  fontWeight: 500 | 600 | 700 | 800;
+  textAlign: "left" | "center" | "right";
+  lineHeight: number;
+  dropShadow: boolean;
+}
+
+/** A visual text layer. Caption layers receive their text from the transcript. */
+export interface TextLayer extends LayerBase {
+  type: "text";
+  source: "caption" | "static";
+  text: string;
+  /** Optional for compatibility with layers saved before text styling existed. */
+  style?: TextLayerStyle;
+}
+
+/** An image layer stored as a project-persisted data URL. */
+export interface ImageLayer extends LayerBase {
+  type: "image";
+  src: string;
+}
+
+export type EditorLayer = TextLayer | ImageLayer;
+
 /** Messages posted from the transcription worker to the main thread. */
 export type WorkerResponse =
   | { type: "progress"; message: string; value: number | null }
