@@ -69,6 +69,7 @@ async function writeSnapshot() {
       transcriptLanguage: s.transcriptLanguage,
       words: s.words,
       showDeleted: s.showDeleted,
+      aiClipSuggestions: s.aiClipSuggestions,
       manualCuts: s.manualCuts,
       sceneBoundaries: s.sceneBoundaries,
       speakers: s.speakers,

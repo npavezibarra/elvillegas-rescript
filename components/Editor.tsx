@@ -148,7 +148,7 @@ export default function Editor() {
   const setSelectedCutIndex = useEditorStore((s) => s.setSelectedCutIndex);
   const setSelectedWords = useEditorStore((s) => s.setSelectedWords);
   const setAiClipPreviewRange = useEditorStore((s) => s.setAiClipPreviewRange);
-  const clearAiClipSuggestions = useEditorStore((s) => s.clearAiClipSuggestions);
+  const setWorkspaceScreen = useEditorStore((s) => s.setWorkspaceScreen);
   const { locale } = useI18n();
   const isSpanish = locale === "es";
 
@@ -365,6 +365,7 @@ export default function Editor() {
                 <button
                   type="button"
                   onClick={() => {
+                    setWorkspaceScreen("clips");
                     setSelectedClipIndex(null);
                     setSelectedCutIndex(null);
                     setSelectedWords([]);
@@ -378,15 +379,15 @@ export default function Editor() {
               </>
             )}
             {videoFile && (
-              <button
-                type="button"
-                onClick={() => {
-                  setSelectedClipIndex(null);
-                  setSelectedCutIndex(null);
-                  setSelectedWords([]);
-                  setAiClipPreviewRange(null);
-                  clearAiClipSuggestions();
-                }}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setWorkspaceScreen("projects");
+                    setSelectedClipIndex(null);
+                    setSelectedCutIndex(null);
+                    setSelectedWords([]);
+                    setAiClipPreviewRange(null);
+                  }}
                 className="flex h-8 items-center rounded-full bg-zinc-900 px-3 text-[13px] font-medium text-white transition hover:bg-zinc-700 cursor-pointer dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
               >
                 {isSpanish ? "Volver a proyectos" : "Back to projects"}

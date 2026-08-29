@@ -13,6 +13,7 @@ import {
   isTranscriptLanguage,
 } from "./languages";
 import type { MediaKind } from "./media";
+import type { ClipSuggestion } from "./aiClips";
 import type { ManualCut, SceneBoundary, SpeakerInfo, Word } from "./types";
 
 const DB_NAME = "rescript-projects";
@@ -43,6 +44,8 @@ function projectSource(row: {
 export interface ProjectRecord extends ProjectMeta {
   words: Word[];
   showDeleted: boolean;
+  /** AI-generated clip suggestions for the project (optional for older saves). */
+  aiClipSuggestions?: ClipSuggestion[];
   /** Blade/trim cuts not owned by deleted words (optional for older saves). */
   manualCuts?: ManualCut[];
   /** Scene split points in original media time (optional for older saves). */
@@ -186,6 +189,7 @@ export async function putProject(input: ProjectWrite): Promise<string> {
       : DEFAULT_TRANSCRIPT_LANGUAGE,
     words: input.words,
     showDeleted: input.showDeleted,
+    aiClipSuggestions: input.aiClipSuggestions ?? [],
     manualCuts: input.manualCuts ?? [],
     sceneBoundaries: input.sceneBoundaries ?? [],
     speakers: input.speakers ?? [],

@@ -260,6 +260,7 @@ interface EditorState {
   setExportOpen: (open: boolean) => void;
   setExportPreviewAspectRatio: (ratio: VideoExportAspectRatio | null) => void;
   setExportPreviewLayout: (layout: VideoExportLayout) => void;
+  setWorkspaceScreen: (screen: WorkspaceScreen) => void;
   setAiClipSuggestions: (suggestions: ClipSuggestion[]) => void;
   clearAiClipSuggestions: () => void;
   setAiClipPreviewRange: (range: TimeRange | null) => void;
@@ -368,7 +369,7 @@ function withWorkflow(
   return {
     ...next,
     projectPhase,
-    workspaceScreen,
+    workspaceScreen: next.workspaceScreen ?? base.workspaceScreen ?? workspaceScreen,
   };
 }
 
@@ -467,6 +468,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       exportPreviewLayout: "fill",
       aiClipSuggestions: [],
       aiClipPreviewRange: null,
+      workspaceScreen: "projects",
       })
     );
     // Funnel step between opening the app and getting a transcript. `kind` and
@@ -521,10 +523,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       exportOpen: false,
       exportPreviewAspectRatio: null,
       exportPreviewLayout: "fill",
-      aiClipSuggestions: [],
+      aiClipSuggestions: record.aiClipSuggestions ?? [],
       aiClipPreviewRange: null,
       waveform: null,
       hasAudio: false,
+      workspaceScreen: "clips",
       })
     );
   },
@@ -936,6 +939,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       selectedClipIndex: selectedClip?.index ?? null,
       selectedCutIndex: null,
       selectedWordIds: [],
+      workspaceScreen: "editor",
     });
     return true;
   },
@@ -983,6 +987,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set((s) =>
       withWorkflow(s, {
         selectedClipIndex,
+        workspaceScreen: selectedClipIndex != null ? "editor" : s.workspaceScreen,
         ...(selectedClipIndex != null ? { selectedCutIndex: null } : {}),
       })
     ),
@@ -991,6 +996,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set((s) =>
       withWorkflow(s, {
         selectedCutIndex,
+        workspaceScreen: selectedCutIndex != null ? "editor" : s.workspaceScreen,
         ...(selectedCutIndex != null ? { selectedClipIndex: null } : {}),
       })
     ),
@@ -1117,8 +1123,16 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set({ exportPreviewAspectRatio }),
   setExportPreviewLayout: (exportPreviewLayout) =>
     set({ exportPreviewLayout }),
+  setWorkspaceScreen: (workspaceScreen) => set({ workspaceScreen }),
   setAiClipSuggestions: (aiClipSuggestions) =>
-    set((s) => withWorkflow(s, { aiClipSuggestions })),
+    set((s) => {
+      const next = withWorkflow(s, {
+        aiClipSuggestions,
+        workspaceScreen: aiClipSuggestions.length > 0 ? "clips" : s.workspaceScreen,
+      });
+      bumpAutosave();
+      return next;
+    }),
   clearAiClipSuggestions: () => set((s) => withWorkflow(s, { aiClipSuggestions: [] })),
   setAiClipPreviewRange: (aiClipPreviewRange) =>
     set({ aiClipPreviewRange }),

@@ -1,6 +1,6 @@
 "use client";
 
-import { FFFSType, type FFmpeg } from "@ffmpeg/ffmpeg";
+import type { FFmpeg } from "@ffmpeg/ffmpeg";
 import { en } from "@/lib/i18n/messages/en";
 import type { TimeRange } from "./types";
 
@@ -61,6 +61,10 @@ export async function getFFmpeg(): Promise<FFmpeg> {
 export async function releaseFFmpeg(): Promise<void> {
   const pending = ffmpegPromise;
   if (!pending) return;
+  // In development, Turbopack + hot reload can interrupt the worker lifecycle
+  // while we are still transitioning between screens. Keeping the instance
+  // alive avoids a noisy terminate path without affecting the app flow.
+  if (process.env.NODE_ENV !== "production") return;
   // Clear first so a concurrent getFFmpeg() builds a fresh instance rather than
   // handing out the one we are about to terminate.
   ffmpegPromise = null;
@@ -89,6 +93,7 @@ async function ensureInput(ffmpeg: FFmpeg, file: File): Promise<string> {
   } catch {
     // The mount point may already exist from a previous run.
   }
+  const { FFFSType } = await import("@ffmpeg/ffmpeg");
   await ffmpeg.mount(
     FFFSType.WORKERFS,
     { blobs: [{ name: INPUT_NAME, data: file }] },

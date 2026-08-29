@@ -89,9 +89,7 @@ export default function ClipsScreen() {
   const createClipFromRange = useEditorStore((s) => s.createClipFromRange);
   const setSelectedWords = useEditorStore((s) => s.setSelectedWords);
   const setAiClipPreviewRange = useEditorStore((s) => s.setAiClipPreviewRange);
-  const clearAiClipSuggestions = useEditorStore(
-    (s) => s.clearAiClipSuggestions
-  );
+  const setWorkspaceScreen = useEditorStore((s) => s.setWorkspaceScreen);
   const isSpanish = locale === "es";
 
   const openClip = useCallback(
@@ -122,7 +120,7 @@ export default function ClipsScreen() {
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <button
             type="button"
-            onClick={() => clearAiClipSuggestions()}
+            onClick={() => setWorkspaceScreen("projects")}
             className="inline-flex items-center gap-2 text-sm font-medium text-zinc-500 transition hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
           >
             <ArrowLeft size={16} />
