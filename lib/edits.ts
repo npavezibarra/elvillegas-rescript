@@ -124,6 +124,18 @@ export function getClipSegments(
   return clips;
 }
 
+/** Resolve the selected clip index into the live clip segment geometry. */
+export function getSelectedClipSegment(
+  cuts: TimeRange[],
+  duration: number,
+  sceneBoundaries: SceneBoundary[],
+  selectedClipIndex: number | null
+): ClipSegment | null {
+  if (selectedClipIndex == null || duration <= 0) return null;
+  const clips = getClipSegments(getKeepRanges(cuts, duration), sceneBoundaries);
+  return clips.find((clip) => clip.index === selectedClipIndex) ?? null;
+}
+
 /**
  * Scene boundaries that actually divide two touching clips — the ones worth
  * showing a split marker for. A boundary sitting at the edge of a skipped region

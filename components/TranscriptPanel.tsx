@@ -19,6 +19,7 @@ import { FloatingPortal } from "@floating-ui/react";
 import { useEditorStore } from "@/lib/store";
 import { isDisfluencyPlaceholder } from "@/lib/disfluencies";
 import TranscriptToolsMenu from "./TranscriptToolsMenu";
+import AiClipsPanel from "./AiClipsPanel";
 import {
   isTranscriptFile,
   parseTranscriptFile,
@@ -33,6 +34,7 @@ import SpeakerLabel, {
 import {
   getActiveSceneBoundaries,
   getKeepRanges,
+  formatTime,
   isWordCutOut,
   mapSplitsToWords,
 } from "@/lib/edits";
@@ -40,6 +42,7 @@ import { useTranscriptSelection } from "@/hooks/useTranscriptSelection";
 import { useTranscriptPlayheadFollow } from "@/hooks/useTranscriptPlayheadFollow";
 import { useWordAnchorFloating } from "@/hooks/useWordAnchorFloating";
 import { useCutRanges } from "@/hooks/useCutRanges";
+import { useSelectedClipSegment } from "@/hooks/useSelectedClipSegment";
 import { findActiveWordId, groupWordsBySpeaker } from "@/lib/transcript";
 import { isTypingTarget } from "@/lib/keyboard";
 import { useI18n } from "./I18nProvider";
@@ -132,24 +135,31 @@ export default function TranscriptPanel() {
   const playing = useEditorStore((s) => s.playing);
   const activeWordId = useEditorStore((s) => findActiveWordId(s.words, s.currentTime));
 
+  const selectedClipSegment = useSelectedClipSegment();
   const cuts = useCutRanges();
+  const transcriptWords = useMemo(() => {
+    if (!selectedClipSegment) return words;
+    return words.filter(
+      (w) => w.end > selectedClipSegment.start && w.start < selectedClipSegment.end
+    );
+  }, [selectedClipSegment, words]);
   const cutOutIds = useMemo(() => {
     const ids = new Set<number>();
-    for (const w of words) {
+    for (const w of transcriptWords) {
       if (isWordCutOut(w, cuts)) ids.add(w.id);
     }
     return ids;
-  }, [words, cuts]);
+  }, [transcriptWords, cuts]);
 
   // Splits get a joinable edit boundary in the transcript, like the timeline's
   // marker. Splits at the edge of a skipped region are inert and hidden in both.
   const splitBeforeWordId = useMemo(
     () =>
       mapSplitsToWords(
-        words,
+        transcriptWords,
         getActiveSceneBoundaries(sceneBoundaries, getKeepRanges(cuts, duration))
       ),
-    [sceneBoundaries, cuts, duration, words]
+    [sceneBoundaries, cuts, duration, transcriptWords]
   );
 
   const containerRef = useRef<HTMLDivElement>(null);
@@ -216,7 +226,10 @@ export default function TranscriptPanel() {
       offsetMain: 12,
     });
 
-  const turns = useMemo(() => groupWordsBySpeaker(words), [words]);
+  const turns = useMemo(
+    () => groupWordsBySpeaker(transcriptWords),
+    [transcriptWords]
+  );
 
   const deletedCount = useMemo(() => cutOutIds.size, [cutOutIds]);
   const handleImportTranscript = useCallback(
@@ -227,10 +240,7 @@ export default function TranscriptPanel() {
         alert(t("transcript.invalidFile"));
         return;
       }
-      if (
-        words.length > 0 &&
-        !confirm(t("transcript.replaceConfirm"))
-      ) {
+      if (transcriptWords.length > 0 && !confirm(t("transcript.replaceConfirm"))) {
         return;
       }
       try {
@@ -245,7 +255,7 @@ export default function TranscriptPanel() {
         );
       }
     },
-    [words.length, importWords, t]
+    [transcriptWords.length, importWords, t]
   );
 
   const cutSelection = useCallback(() => {
@@ -350,6 +360,12 @@ export default function TranscriptPanel() {
           {t("transcript.header")}
         </span>
         <div className="ml-auto flex items-center gap-2">
+          {selectedClipSegment && (
+            <span className="rounded-md bg-indigo-50 px-2 py-0.5 text-[9px] font-medium text-indigo-700 dark:bg-indigo-950/50 dark:text-indigo-300">
+              Clip {formatTime(selectedClipSegment.start)} - {formatTime(selectedClipSegment.end)}
+            </span>
+          )}
+          {status === "ready" && <AiClipsPanel />}
           {deletedCount > 0 && (
             <span className="rounded-md bg-red-50 px-2 py-0.5 text-[9px] font-medium text-red-600 line-clamp-1 line-through dark:bg-red-950/40 dark:text-red-400">
               {t(
@@ -435,7 +451,7 @@ export default function TranscriptPanel() {
             </div>
           )}
 
-          {status === "ready" && words.length === 0 && (
+          {status === "ready" && transcriptWords.length === 0 && (
               <p className="mt-2 flex items-center gap-1 text-sm font-medium text-zinc-500 dark:text-zinc-500">
                 <VolumeOff size={16} /> {t("transcript.noSpeech")}
               </p>
@@ -449,7 +465,7 @@ export default function TranscriptPanel() {
                   : turn.words.filter((w) => !cutOutIds.has(w.id));
                 if (visible.length === 0) return null;
                 // First turn in the full word list has no previous speaker to borrow from.
-                const canMove = turn.words[0].id !== words[0]?.id;
+                const canMove = turn.words[0].id !== transcriptWords[0]?.id;
                 return (
                   <div key={`${turn.speaker}-${turn.words[0].id}`} className="mb-7">
                     <SpeakerLabel

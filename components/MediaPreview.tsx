@@ -2,8 +2,12 @@
 
 import { useCallback, useEffect, useRef } from "react";
 import { useEditorStore } from "@/lib/store";
-import { cutRangeAt, PLAYHEAD_EPSILON_S } from "@/lib/edits";
+import {
+  cutRangeAt,
+  PLAYHEAD_EPSILON_S,
+} from "@/lib/edits";
 import { useCutRanges } from "@/hooks/useCutRanges";
+import { useSelectedClipSegment } from "@/hooks/useSelectedClipSegment";
 
 /**
  * Owns the <video>/<audio> element and the cut-skipping playback loop.
@@ -17,7 +21,21 @@ export default function MediaPreview() {
   const setDuration = useEditorStore((s) => s.setDuration);
   const setPlaying = useEditorStore((s) => s.setPlaying);
   const setCurrentTime = useEditorStore((s) => s.setCurrentTime);
+  const aiClipPreviewRange = useEditorStore((s) => s.aiClipPreviewRange);
+  const setAiClipPreviewRange = useEditorStore((s) => s.setAiClipPreviewRange);
+  const exportPreviewAspectRatio = useEditorStore(
+    (s) => s.exportPreviewAspectRatio
+  );
+  const setExportPreviewAspectRatio = useEditorStore(
+    (s) => s.setExportPreviewAspectRatio
+  );
+  const exportPreviewLayout = useEditorStore((s) => s.exportPreviewLayout);
+  const setExportPreviewLayout = useEditorStore(
+    (s) => s.setExportPreviewLayout
+  );
   const cuts = useCutRanges();
+  const selectedClipSegment = useSelectedClipSegment();
+  const activePlaybackRange = selectedClipSegment ?? aiClipPreviewRange;
 
   const mediaRef = useRef<HTMLMediaElement | null>(null);
   const isAudio = mediaKind === "audio";
@@ -25,6 +43,18 @@ export default function MediaPreview() {
   useEffect(() => {
     cutsRef.current = cuts;
   }, [cuts]);
+
+  useEffect(() => {
+    const media = mediaRef.current;
+    if (!media || !selectedClipSegment) return;
+    if (
+      media.currentTime < selectedClipSegment.start ||
+      media.currentTime > selectedClipSegment.end
+    ) {
+      media.currentTime = selectedClipSegment.start;
+      setCurrentTime(selectedClipSegment.start);
+    }
+  }, [selectedClipSegment, setCurrentTime]);
 
   const refCb = useCallback(
     (el: HTMLMediaElement | null) => {
@@ -42,6 +72,18 @@ export default function MediaPreview() {
       if (media) {
         let t = media.currentTime;
         if (!media.paused) {
+          if (activePlaybackRange && t >= activePlaybackRange.end - 0.02) {
+            media.pause();
+            media.currentTime = activePlaybackRange.end;
+            if (!selectedClipSegment) setAiClipPreviewRange(null);
+            t = activePlaybackRange.end;
+          } else if (
+            activePlaybackRange &&
+            t < activePlaybackRange.start - 0.02
+          ) {
+            media.currentTime = activePlaybackRange.start;
+            t = activePlaybackRange.start;
+          }
           const cut = cutRangeAt(t, cutsRef.current);
           if (cut) {
             const target = cut.end + PLAYHEAD_EPSILON_S;
@@ -62,7 +104,12 @@ export default function MediaPreview() {
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [setCurrentTime]);
+  }, [
+    activePlaybackRange,
+    selectedClipSegment,
+    setAiClipPreviewRange,
+    setCurrentTime,
+  ]);
 
   const togglePlay = useCallback(() => {
     useEditorStore.getState().togglePlayback();
@@ -84,19 +131,123 @@ export default function MediaPreview() {
     );
   }
 
+  const selectedAspectRatio = exportPreviewAspectRatio ?? "original";
+  const framedPreview =
+    selectedAspectRatio === "landscape"
+      ? "16 / 9"
+      : selectedAspectRatio === "portrait"
+        ? "9 / 16"
+        : null;
+  const isRatioOriginal = selectedAspectRatio === "original";
+  const objectFit = isRatioOriginal
+    ? "contain"
+    : exportPreviewLayout === "fit"
+      ? "contain"
+      : "cover";
+  const ratioButtonClass = (selected: boolean) =>
+    `rounded-full px-2.5 py-1 transition ${
+      selected
+        ? "bg-white text-zinc-950 shadow-sm"
+        : "text-white/70 hover:bg-white/10 hover:text-white"
+    }`;
+  const layoutButtonClass = (selected: boolean, disabled: boolean) =>
+    `rounded-full px-2.5 py-1 transition ${
+      disabled
+        ? "cursor-not-allowed text-white/30"
+        : selected
+          ? "bg-white text-zinc-950 shadow-sm"
+          : "text-white/70 hover:bg-white/10 hover:text-white"
+    }`;
+
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-zinc-50/70 p-3 sm:p-4 dark:bg-zinc-950/70">
-      <div className="flex min-h-0 flex-1 items-center justify-center">
-        <video
-          ref={refCb}
-          src={mediaUrl}
-          playsInline
-          onClick={togglePlay}
-          onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
-          onPlay={() => setPlaying(true)}
-          onPause={() => setPlaying(false)}
-          className="max-h-full max-w-full cursor-pointer rounded-sm bg-black shadow-lg shadow-zinc-900/10 dark:shadow-black/40"
-        />
+      <div className="relative flex min-h-0 flex-1 items-center justify-center">
+        <div className="pointer-events-none absolute right-3 top-3 z-10">
+          <div className="pointer-events-auto flex items-center gap-2 rounded-2xl bg-zinc-950/85 p-1.5 text-xs font-medium text-white shadow-xl shadow-black/20 backdrop-blur">
+            <span className="pl-1 pr-0.5 text-[10px] uppercase tracking-[0.18em] text-white/45">
+              Ratio
+            </span>
+            <button
+              type="button"
+              onClick={() => setExportPreviewAspectRatio(null)}
+              className={ratioButtonClass(isRatioOriginal)}
+            >
+              Original
+            </button>
+            <button
+              type="button"
+              onClick={() => setExportPreviewAspectRatio("landscape")}
+              className={ratioButtonClass(selectedAspectRatio === "landscape")}
+            >
+              16:9
+            </button>
+            <button
+              type="button"
+              onClick={() => setExportPreviewAspectRatio("portrait")}
+              className={ratioButtonClass(selectedAspectRatio === "portrait")}
+            >
+              9:16
+            </button>
+            <span className="mx-1 h-5 w-px bg-white/10" />
+            <span className="pl-1 pr-0.5 text-[10px] uppercase tracking-[0.18em] text-white/45">
+              Layout
+            </span>
+            <button
+              type="button"
+              disabled={isRatioOriginal}
+              onClick={() => setExportPreviewLayout("fit")}
+              className={layoutButtonClass(
+                exportPreviewLayout === "fit",
+                isRatioOriginal
+              )}
+            >
+              Fit
+            </button>
+            <button
+              type="button"
+              disabled={isRatioOriginal}
+              onClick={() => setExportPreviewLayout("fill")}
+              className={layoutButtonClass(
+                exportPreviewLayout === "fill",
+                isRatioOriginal
+              )}
+            >
+              Fill
+            </button>
+          </div>
+        </div>
+        {framedPreview ? (
+          <div
+            className="relative h-full max-h-full max-w-full overflow-hidden rounded-sm bg-black shadow-lg shadow-zinc-900/10 dark:shadow-black/40"
+            style={{ aspectRatio: framedPreview }}
+          >
+            <video
+              ref={refCb}
+              src={mediaUrl}
+              playsInline
+              onClick={togglePlay}
+              onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
+              onPlay={() => setPlaying(true)}
+              onPause={() => setPlaying(false)}
+              className={
+                objectFit === "contain"
+                  ? "h-full w-full cursor-pointer object-contain"
+                  : "h-full w-full cursor-pointer object-cover"
+              }
+            />
+          </div>
+        ) : (
+          <video
+            ref={refCb}
+            src={mediaUrl}
+            playsInline
+            onClick={togglePlay}
+            onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
+            onPlay={() => setPlaying(true)}
+            onPause={() => setPlaying(false)}
+            className="max-h-full max-w-full cursor-pointer rounded-sm bg-black object-contain shadow-lg shadow-zinc-900/10 dark:shadow-black/40"
+          />
+        )}
       </div>
     </div>
   );

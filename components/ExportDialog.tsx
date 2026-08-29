@@ -17,7 +17,9 @@ import {
   exportAudio,
   exportVideo,
   type AudioExportFormat,
+  type VideoExportAspectRatio,
   type VideoExportFormat,
+  type VideoExportLayout,
   type VideoExportResolution,
 } from "@/lib/ffmpeg";
 import {
@@ -52,6 +54,17 @@ const VIDEO_RESOLUTIONS: { value: VideoExportResolution; label: string }[] = [
   { value: "2160", label: "4K" },
 ];
 
+const VIDEO_ASPECT_RATIOS: { value: VideoExportAspectRatio; label: string }[] = [
+  { value: "original", label: "Original" },
+  { value: "landscape", label: "16:9" },
+  { value: "portrait", label: "9:16" },
+];
+
+const VIDEO_LAYOUTS: { value: VideoExportLayout; label: string }[] = [
+  { value: "fit", label: "Fit" },
+  { value: "fill", label: "Fill" },
+];
+
 const AUDIO_FORMATS: { value: AudioExportFormat; label: string }[] = [
   { value: "m4a", label: "M4A" },
   { value: "mp3", label: "MP3" },
@@ -73,12 +86,23 @@ export default function ExportDialog() {
   const { t } = useI18n();
   const open = useEditorStore((s) => s.exportOpen);
   const setOpen = useEditorStore((s) => s.setExportOpen);
+  const exportPreviewAspectRatio = useEditorStore(
+    (s) => s.exportPreviewAspectRatio
+  );
+  const setExportPreviewAspectRatio = useEditorStore(
+    (s) => s.setExportPreviewAspectRatio
+  );
+  const exportPreviewLayout = useEditorStore((s) => s.exportPreviewLayout);
+  const setExportPreviewLayout = useEditorStore(
+    (s) => s.setExportPreviewLayout
+  );
   const videoFile = useEditorStore((s) => s.videoFile);
   const mediaKind = useEditorStore((s) => s.mediaKind);
   const duration = useEditorStore((s) => s.duration);
   const words = useEditorStore((s) => s.words);
   const speakers = useEditorStore((s) => s.speakers);
   const hasAudioTrack = useEditorStore((s) => s.hasAudio);
+  const videoEl = useEditorStore((s) => s.videoEl);
   const status = useEditorStore((s) => s.status);
   const setStatus = useEditorStore((s) => s.setStatus);
   const exportUrl = useEditorStore((s) => s.exportUrl);
@@ -114,21 +138,23 @@ export default function ExportDialog() {
   const exporting = status === "exporting";
   const dialogBusy = exporting || timelineBusy;
   const hasWords = words.length > 0;
+  const aspectRatio: VideoExportAspectRatio =
+    exportPreviewAspectRatio ?? "original";
 
   // Fall back when the remembered tab isn't valid for this project.
   const activeTab: ExportTab =
     tab === "video" && isAudioProject
-      ? "audio"
-      : tab === "audio" && !hasAudioTrack
-        ? isAudioProject
-          ? "timeline"
-          : "video"
-        : (tab === "transcript" || tab === "subtitles") && !hasWords
-          ? isAudioProject
-            ? hasAudioTrack
-              ? "audio"
-              : "timeline"
-            : "video"
+          ? "audio"
+          : tab === "audio" && !hasAudioTrack
+            ? isAudioProject
+              ? "timeline"
+              : "video"
+          : (tab === "transcript" || tab === "subtitles") && !hasWords
+            ? isAudioProject
+              ? hasAudioTrack
+                ? "audio"
+                : "timeline"
+              : "video"
           : tab;
 
   const baseName = videoFile
@@ -141,7 +167,11 @@ export default function ExportDialog() {
       : videoFormat === "webm"
         ? "webm"
         : "mp4";
-  const mediaFileName = `${baseName}.edited.${mediaExt}`;
+  const mediaStem =
+    activeTab === "video" && aspectRatio !== "original"
+      ? `${baseName}.edited.${aspectRatio === "portrait" ? "reel" : "wide"}`
+      : `${baseName}.edited`;
+  const mediaFileName = `${mediaStem}.${mediaExt}`;
 
   const clearMediaExport = useCallback(() => {
     const prev = useEditorStore.getState().exportUrl;
@@ -195,6 +225,22 @@ export default function ExportDialog() {
     [clearMediaExport]
   );
 
+  const setAspectRatioOption = useCallback(
+    (value: VideoExportAspectRatio) => {
+      clearMediaExport();
+      setExportPreviewAspectRatio(value === "original" ? null : value);
+    },
+    [clearMediaExport, setExportPreviewAspectRatio]
+  );
+
+  const setLayoutOption = useCallback(
+    (value: VideoExportLayout) => {
+      clearMediaExport();
+      setExportPreviewLayout(value);
+    },
+    [clearMediaExport, setExportPreviewLayout]
+  );
+
   const startMediaExport = useCallback(async () => {
     if (!videoFile) return;
     if (activeTab === "video" && isAudioProject) return;
@@ -214,6 +260,16 @@ export default function ExportDialog() {
               withAudio: hasAudioTrack,
               format: videoFormat,
               resolution,
+              aspectRatio,
+              layout: exportPreviewLayout,
+              sourceWidth:
+                videoEl && "videoWidth" in videoEl
+                  ? (videoEl as HTMLVideoElement).videoWidth || 1920
+                  : 1920,
+              sourceHeight:
+                videoEl && "videoHeight" in videoEl
+                  ? (videoEl as HTMLVideoElement).videoHeight || 1080
+                  : 1080,
             });
       const prev = useEditorStore.getState().exportUrl;
       if (prev) URL.revokeObjectURL(prev);
@@ -221,7 +277,9 @@ export default function ExportDialog() {
       trackEvent("export_completed", {
         kind: activeTab,
         format: activeTab === "audio" ? audioFormat : videoFormat,
-        ...(activeTab === "audio" ? {} : { resolution }),
+        ...(activeTab === "audio"
+          ? {}
+          : { resolution, aspectRatio, layout: exportPreviewLayout }),
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : en["error.export"]);
@@ -239,6 +297,9 @@ export default function ExportDialog() {
     audioFormat,
     videoFormat,
     resolution,
+    aspectRatio,
+    exportPreviewLayout,
+    videoEl,
     setStatus,
     setExportUrl,
   ]);
@@ -432,6 +493,20 @@ export default function ExportDialog() {
               options={VIDEO_FORMATS}
               disabled={exporting}
               onChange={setVideoFormatOption}
+            />
+            <OptionGroup
+              label="Aspect ratio"
+              value={aspectRatio}
+              options={VIDEO_ASPECT_RATIOS}
+              disabled={exporting}
+              onChange={setAspectRatioOption}
+            />
+            <OptionGroup
+              label="Layout"
+              value={exportPreviewLayout}
+              options={VIDEO_LAYOUTS}
+              disabled={exporting || aspectRatio === "original"}
+              onChange={setLayoutOption}
             />
             <OptionGroup
               label={t("export.resolution")}

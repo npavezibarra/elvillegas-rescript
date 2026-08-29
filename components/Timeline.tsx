@@ -31,6 +31,7 @@ import {
   getClipSegments,
   getEditedDuration,
   getKeepRanges,
+  getSelectedClipSegment,
   isWordCutOut,
   originalToEdited,
   trimEdgeBounds,
@@ -40,6 +41,7 @@ import { isDisfluencyPlaceholder } from "@/lib/disfluencies";
 import { VAD_SAMPLE_RATE } from "@/lib/vad";
 import { peakBetween } from "@/lib/waveform";
 import { useCutRanges } from "@/hooks/useCutRanges";
+import { useSelectedClipSegment } from "@/hooks/useSelectedClipSegment";
 import { useIsDark } from "@/hooks/useIsDark";
 import { useI18n } from "./I18nProvider";
 
@@ -108,6 +110,7 @@ export default function Timeline() {
   const selectedWordIds = useEditorStore((s) => s.selectedWordIds);
   const status = useEditorStore((s) => s.status);
 
+  const selectedClipSegment = useSelectedClipSegment();
   const cuts = useCutRanges();
   const keeps = useMemo(() => getKeepRanges(cuts, duration), [cuts, duration]);
   const clips = useMemo(
@@ -141,9 +144,22 @@ export default function Timeline() {
   const [hoveredSplitId, setHoveredSplitId] = useState<number | null>(null);
   const dark = useIsDark();
 
-  const fitPps = duration > 0 && width > 0 ? width / duration : 50;
+  const timelineStart = selectedClipSegment?.start ?? 0;
+  const timelineEnd = selectedClipSegment?.end ?? duration;
+  const timelineDuration = Math.max(0, timelineEnd - timelineStart);
+  const timelineBase = selectedClipSegment ? timelineStart : 0;
+  const timelineVisibleDuration = selectedClipSegment ? timelineDuration : duration;
+  const fitPps =
+    selectedClipSegment && timelineDuration > 0 && width > 0
+      ? width / timelineDuration
+      : duration > 0 && width > 0
+        ? width / duration
+        : 50;
   const pps = fitPps * zoom;
-  const totalWidth = Math.max(width, duration * pps);
+  const totalWidth = Math.max(
+    width,
+    timelineVisibleDuration * pps
+  );
   const ready = status === "ready" && duration > 0;
   // Clip delete is for a clip-body click (no word selection). Clicking a word
   // also selects its clip for trim handles — don't treat that as "delete clip".
@@ -175,8 +191,16 @@ export default function Timeline() {
     ppsRef.current = pps;
     zoomRef.current = zoom;
     widthRef.current = width;
-    durationRef.current = duration;
-  });
+    durationRef.current = timelineVisibleDuration;
+  }, [pps, zoom, width, timelineVisibleDuration]);
+
+  useEffect(() => {
+    const raf = requestAnimationFrame(() => {
+      setZoom(1);
+      setScrollLeft(0);
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [selectedClipIndex]);
 
   // Scroll position to apply after a wheel-zoom re-renders the track width.
   const pendingScrollRef = useRef<number | null>(null);
@@ -220,10 +244,11 @@ export default function Timeline() {
     const firstTick = Math.floor(scrollLeft / pps / step) * step;
     for (let t = firstTick; t <= (scrollLeft + width) / pps + step; t += step) {
       const x = t * pps - scrollLeft;
+      const labelTime = timelineBase + t;
       ctx.fillStyle = dark ? "#3f3f46" : "#e4e4e7";
       ctx.fillRect(x, RULER_H - 6, 1, 6);
       ctx.fillStyle = dark ? "#71717a" : "#a1a1aa";
-      ctx.fillText(formatTime(t), x + 4, 3);
+      ctx.fillText(formatTime(labelTime), x + 4, 3);
     }
     ctx.strokeStyle = dark ? "#27272a" : "#f0f0f2";
     ctx.beginPath();
@@ -240,12 +265,12 @@ export default function Timeline() {
     ctx.lineTo(width, RULER_H + WORDBAR_H - 0.5);
     ctx.stroke();
 
-    if (duration === 0) return;
+    if (timelineVisibleDuration === 0) return;
 
     // Clip selection / hover washes on waveform
     for (const clip of clips) {
-      const x0 = clip.start * pps - scrollLeft;
-      const x1 = clip.end * pps - scrollLeft;
+      const x0 = (clip.start - timelineBase) * pps - scrollLeft;
+      const x1 = (clip.end - timelineBase) * pps - scrollLeft;
       if (x1 < 0 || x0 > width) continue;
       const selected = clip.index === selectedClipIndex;
       const hovered = clip.index === hoveredClipIndex && !selected;
@@ -269,8 +294,8 @@ export default function Timeline() {
 
     // Cut range backgrounds (selected / hovered wash stronger)
     cuts.forEach((cut, cutIndex) => {
-      const x0 = cut.start * pps - scrollLeft;
-      const x1 = cut.end * pps - scrollLeft;
+      const x0 = (cut.start - timelineBase) * pps - scrollLeft;
+      const x1 = (cut.end - timelineBase) * pps - scrollLeft;
       if (x1 < 0 || x0 > width) return;
       const selected = cutIndex === selectedCutIndex;
       const hovered = cutIndex === hoveredCutIndex && !selected;
@@ -328,8 +353,9 @@ export default function Timeline() {
     if (!waveform) return;
     const samplesPerPx = VAD_SAMPLE_RATE / pps;
     for (let x = 0; x < width; x++) {
-      const t = (scrollLeft + x) / pps;
-      if (t > duration) break;
+      const localT = (scrollLeft + x) / pps;
+      if (localT > timelineVisibleDuration) break;
+      const t = timelineBase + localT;
       const i0 = Math.floor(t * VAD_SAMPLE_RATE);
       const peak = peakBetween(waveform, i0, Math.floor(i0 + samplesPerPx) + 1);
       const inCut = cuts.some((c) => t >= c.start && t < c.end);
@@ -351,6 +377,8 @@ export default function Timeline() {
     selectedCutIndex,
     hoveredCutIndex,
     dark,
+    timelineBase,
+    timelineVisibleDuration,
   ]);
 
   // Panning or zooming during playback hands the window to the user until the
@@ -366,12 +394,12 @@ export default function Timeline() {
     if (!playing || userScrolledRef.current) return;
     const el = scrollRef.current;
     if (!el) return;
-    const px = currentTime * pps;
+    const px = (currentTime - timelineBase) * pps;
     if (px < el.scrollLeft + 24 || px > el.scrollLeft + width - 96) {
       el.scrollLeft = Math.max(0, px - 96);
       autoScrollRef.current = el.scrollLeft;
     }
-  }, [currentTime, playing, pps, width]);
+  }, [currentTime, playing, pps, width, timelineBase]);
 
   // Vertical wheel / pinch zooms (anchored at the pointer); horizontal
   // trackpad side-scroll pans via native overflow-x. Non-passive so zoom
@@ -421,12 +449,13 @@ export default function Timeline() {
       const el = scrollRef.current;
       if (!el) return 0;
       const rect = el.getBoundingClientRect();
+      const localTime = (clientX - rect.left + el.scrollLeft) / pps;
       return Math.min(
-        Math.max(0, (clientX - rect.left + el.scrollLeft) / pps),
-        duration
+        Math.max(0, localTime + timelineBase),
+        selectedClipSegment ? timelineEnd : duration
       );
     },
-    [pps, duration]
+    [pps, duration, timelineBase, timelineEnd, selectedClipSegment]
   );
 
   const seekTo = useCallback((t: number) => {
@@ -587,21 +616,34 @@ export default function Timeline() {
   }, []);
 
   const skip = useCallback((delta: number) => {
-    const { videoEl, setCurrentTime } = useEditorStore.getState();
+    const { videoEl, setCurrentTime, selectedClipIndex } = useEditorStore.getState();
     if (!videoEl) return;
-    const t = Math.min(Math.max(0, videoEl.currentTime + delta), videoEl.duration);
+    const cuts = getCutRanges(
+      useEditorStore.getState().words,
+      useEditorStore.getState().duration,
+      useEditorStore.getState().manualCuts
+    );
+    const selectedClip = getSelectedClipSegment(
+      cuts,
+      useEditorStore.getState().duration,
+      useEditorStore.getState().sceneBoundaries,
+      selectedClipIndex
+    );
+    const minTime = selectedClip?.start ?? 0;
+    const maxTime = selectedClip?.end ?? videoEl.duration;
+    const t = Math.min(Math.max(minTime, videoEl.currentTime + delta), maxTime);
     videoEl.currentTime = t;
     setCurrentTime(t);
   }, []);
 
   // Word labels for the visible window
   const visibleWords = useMemo(() => {
-    const t0 = scrollLeft / pps - 1;
-    const t1 = (scrollLeft + width) / pps + 1;
+    const t0 = timelineBase + scrollLeft / pps - 1;
+    const t1 = timelineBase + (scrollLeft + width) / pps + 1;
     return words.filter((w) => w.end >= t0 && w.start <= t1);
-  }, [words, pps, scrollLeft, width]);
+  }, [words, pps, scrollLeft, width, timelineBase]);
 
-  const playheadX = currentTime * pps - scrollLeft;
+  const playheadX = (currentTime - timelineBase) * pps - scrollLeft;
   const showHandles = pps >= HANDLE_VIS_PPS;
 
   return (
@@ -821,7 +863,12 @@ export default function Timeline() {
                 <div
                   key={`split-${b.id}`}
                   className="pointer-events-none absolute z-[8] flex -translate-x-1/2 justify-center items-center"
-                  style={{ left: b.time * pps, top: RULER_H + WORDBAR_H + 4, bottom: 0, width: 18 }}
+                  style={{
+                    left: (b.time - timelineBase) * pps,
+                    top: RULER_H + WORDBAR_H + 4,
+                    bottom: 0,
+                    width: 18,
+                  }}
                 >
                   {hovered && (
                     <button
@@ -845,7 +892,7 @@ export default function Timeline() {
               <div
                 className="pointer-events-none absolute z-[4] rounded-sm ring-1 ring-red-400/55 dark:ring-red-300/50"
                 style={{
-                  left: cuts[selectedCutIndex].start * pps,
+                  left: (cuts[selectedCutIndex].start - timelineBase) * pps,
                   width: Math.max(
                     2,
                     (cuts[selectedCutIndex].end - cuts[selectedCutIndex].start) * pps
@@ -869,7 +916,7 @@ export default function Timeline() {
                     onPointerDown={(e) => startTrimDrag(e, clip, "in")}
                     className="tl-trim-handle absolute z-[6] -translate-x-1/2 cursor-ew-resize"
                     style={{
-                      left: clip.start * pps,
+                      left: (clip.start - timelineBase) * pps,
                       top: RULER_H + WORDBAR_H + 4,
                       bottom: 4,
                       opacity: selected ? 1 : 0.7,
@@ -889,7 +936,7 @@ export default function Timeline() {
                     onPointerDown={(e) => startTrimDrag(e, clip, "out")}
                     className="tl-trim-handle absolute z-[6] -translate-x-1/2 cursor-ew-resize"
                     style={{
-                      left: clip.end * pps,
+                      left: (clip.end - timelineBase) * pps,
                       top: RULER_H + WORDBAR_H + 4,
                       bottom: 4,
                       opacity: selected ? 1 : 0.7,
@@ -908,7 +955,7 @@ export default function Timeline() {
                     <div
                       className="pointer-events-none absolute z-[4] rounded-sm ring-1 ring-indigo-400/55 dark:ring-indigo-300/50"
                       style={{
-                        left: clip.start * pps,
+                        left: (clip.start - timelineBase) * pps,
                         width: Math.max(2, (clip.end - clip.start) * pps),
                         top: RULER_H + WORDBAR_H + SELECTION_INSET,
                         bottom: SELECTION_INSET,
@@ -945,7 +992,7 @@ export default function Timeline() {
                             : "border-zinc-200/90 bg-white/95 text-zinc-600 dark:border-zinc-700/90 dark:bg-zinc-800/95 dark:text-zinc-300"
                   } ${wordSelected ? "ring-1 ring-indigo-400/80" : ""}`}
                   style={{
-                    left: w.start * pps,
+                    left: (w.start - timelineBase) * pps,
                     top: RULER_H + 5,
                     width: wWidth,
                     height: WORDBAR_H - 10,

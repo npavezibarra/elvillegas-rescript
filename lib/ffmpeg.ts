@@ -1,14 +1,16 @@
 "use client";
 
-import type { FFmpeg } from "@ffmpeg/ffmpeg";
+import { FFFSType, type FFmpeg } from "@ffmpeg/ffmpeg";
 import { en } from "@/lib/i18n/messages/en";
 import type { TimeRange } from "./types";
 
 const CORE_BASE = "/vendor/ffmpeg";
+const INPUT_DIR = "/input";
 const INPUT_NAME = "input_video";
+const INPUT_PATH = `${INPUT_DIR}/${INPUT_NAME}`;
 
 let ffmpegPromise: Promise<FFmpeg> | null = null;
-let writtenFor: File | null = null;
+let mountedFor: File | null = null;
 
 /** Lazily load a singleton multi-threaded ffmpeg.wasm instance. */
 export async function getFFmpeg(): Promise<FFmpeg> {
@@ -62,7 +64,7 @@ export async function releaseFFmpeg(): Promise<void> {
   // Clear first so a concurrent getFFmpeg() builds a fresh instance rather than
   // handing out the one we are about to terminate.
   ffmpegPromise = null;
-  writtenFor = null;
+  mountedFor = null;
   try {
     (await pending).terminate();
   } catch {
@@ -71,12 +73,29 @@ export async function releaseFFmpeg(): Promise<void> {
 }
 
 async function ensureInput(ffmpeg: FFmpeg, file: File): Promise<string> {
-  if (writtenFor !== file) {
-    const { fetchFile } = await import("@ffmpeg/util");
-    await ffmpeg.writeFile(INPUT_NAME, await fetchFile(file));
-    writtenFor = file;
+  if (mountedFor === file) return INPUT_PATH;
+
+  if (mountedFor) {
+    try {
+      await ffmpeg.unmount(INPUT_DIR);
+    } catch {
+      // Nothing mounted yet or the worker is already gone.
+    }
+    mountedFor = null;
   }
-  return INPUT_NAME;
+
+  try {
+    await ffmpeg.createDir(INPUT_DIR);
+  } catch {
+    // The mount point may already exist from a previous run.
+  }
+  await ffmpeg.mount(
+    FFFSType.WORKERFS,
+    { blobs: [{ name: INPUT_NAME, data: file }] },
+    INPUT_DIR
+  );
+  mountedFor = file;
+  return INPUT_PATH;
 }
 
 /**
@@ -125,6 +144,12 @@ export type VideoExportFormat = "mp4" | "webm";
 /** Target output height. `"original"` keeps the source resolution. */
 export type VideoExportResolution = "original" | "720" | "1080" | "2160";
 
+/** Output crop / aspect ratio preset. */
+export type VideoExportAspectRatio = "original" | "landscape" | "portrait";
+
+/** How the source fits inside the chosen aspect ratio. */
+export type VideoExportLayout = "fit" | "fill";
+
 /** Container / codec presets for audio-only export. */
 export type AudioExportFormat = "m4a" | "mp3" | "wav";
 
@@ -133,6 +158,10 @@ export interface VideoExportOptions {
   withAudio?: boolean;
   format?: VideoExportFormat;
   resolution?: VideoExportResolution;
+  aspectRatio?: VideoExportAspectRatio;
+  layout?: VideoExportLayout;
+  sourceWidth?: number;
+  sourceHeight?: number;
 }
 
 export interface AudioExportOptions {
@@ -157,6 +186,58 @@ function scaleFilter(resolution: VideoExportResolution): string | null {
   return `scale=-2:'min(ih,${h})',scale=trunc(iw/2)*2:trunc(ih/2)*2`;
 }
 
+function even(n: number): number {
+  return Math.max(2, Math.floor(n / 2) * 2);
+}
+
+function cropFilter(width: number, height: number): string {
+  return `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},setsar=1`;
+}
+
+function fitFilter(width: number, height: number): string {
+  return `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`;
+}
+
+/** Compute the centered export size for a 16:9 or 9:16 render. */
+export function getVideoAspectRatioDimensions(
+  resolution: VideoExportResolution,
+  aspectRatio: VideoExportAspectRatio,
+  sourceWidth = 1920,
+  sourceHeight = 1080
+): { width: number; height: number } | null {
+  if (aspectRatio === "original") return null;
+  const baseHeight =
+    resolution === "original"
+      ? Math.max(2, Math.min(sourceWidth, sourceHeight))
+      : VIDEO_HEIGHT[resolution];
+  if (aspectRatio === "landscape") {
+    return { width: even((baseHeight * 16) / 9), height: even(baseHeight) };
+  }
+  return { width: even(baseHeight), height: even((baseHeight * 16) / 9) };
+}
+
+/** Video reframe filter for the chosen export aspect ratio. */
+export function getVideoExportTransform(
+  resolution: VideoExportResolution,
+  aspectRatio: VideoExportAspectRatio,
+  sourceWidth = 1920,
+  sourceHeight = 1080,
+  layout: VideoExportLayout = "fill"
+): string | null {
+  const dimensions = getVideoAspectRatioDimensions(
+    resolution,
+    aspectRatio,
+    sourceWidth,
+    sourceHeight
+  );
+  if (dimensions) {
+    return layout === "fit"
+      ? fitFilter(dimensions.width, dimensions.height)
+      : cropFilter(dimensions.width, dimensions.height);
+  }
+  return scaleFilter(resolution);
+}
+
 /**
  * Render the edited video: keep only `keepRanges` of the original media and
  * concatenate them. Re-encodes so cuts land exactly on word boundaries
@@ -172,6 +253,10 @@ export async function exportVideo(
     withAudio = true,
     format = "mp4",
     resolution = "original",
+    aspectRatio = "original",
+    layout = "fill",
+    sourceWidth = 1920,
+    sourceHeight = 1080,
   }: VideoExportOptions = {}
 ): Promise<Blob> {
   if (keepRanges.length === 0) {
@@ -180,7 +265,13 @@ export async function exportVideo(
   const ffmpeg = await getFFmpeg();
   const input = await ensureInput(ffmpeg, file);
   const out = format === "webm" ? "output.webm" : "output.mp4";
-  const scale = scaleFilter(resolution);
+  const transform = getVideoExportTransform(
+    resolution,
+    aspectRatio,
+    sourceWidth,
+    sourceHeight,
+    layout
+  );
 
   const parts: string[] = [];
   const labels: string[] = [];
@@ -199,9 +290,9 @@ export async function exportVideo(
     `;${labels.join("")}concat=n=${keepRanges.length}:v=1:a=${
       withAudio ? 1 : 0
     }[outv]${withAudio ? "[outa]" : ""}`;
-  const videoMap = scale ? "[vout]" : "[outv]";
-  if (scale) {
-    filter += `;[outv]${scale}[vout]`;
+  const videoMap = transform ? "[vout]" : "[outv]";
+  if (transform) {
+    filter += `;[outv]${transform}[vout]`;
   }
 
   const progressHandler = ({ time }: { progress: number; time: number }) => {

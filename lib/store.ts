@@ -21,6 +21,7 @@ import {
   getClipSegments,
   getCutRanges,
   getKeepRanges,
+  getSelectedClipSegment,
   PLAYHEAD_EPSILON_S,
   restoreRangesResult,
   shrinkManualCuts,
@@ -36,6 +37,7 @@ import {
   saveTranscriptLanguagePreference,
   type TranscriptLanguage,
 } from "./languages";
+import type { ClipSuggestion } from "./aiClips";
 import { en } from "@/lib/i18n/messages/en";
 import { detectMediaKind, type MediaKind } from "./media";
 import { buildWaveformPeaks, type WaveformPeaks } from "./waveform";
@@ -44,6 +46,15 @@ import {
   fileFromProject,
   getProject,
 } from "./projects";
+import type {
+  VideoExportAspectRatio,
+  VideoExportLayout,
+} from "./ffmpeg";
+import {
+  deriveWorkflow,
+  type ProjectPhase,
+  type WorkspaceScreen,
+} from "./workflow";
 import {
   addSpeaker as addSpeakerEntry,
   findSpeakerByName,
@@ -139,6 +150,14 @@ interface EditorState {
   // Export
   exportUrl: string | null;
   exportOpen: boolean;
+  exportPreviewAspectRatio: VideoExportAspectRatio | null;
+  exportPreviewLayout: VideoExportLayout;
+  aiClipSuggestions: ClipSuggestion[];
+  aiClipPreviewRange: TimeRange | null;
+  /** Coarse-grained product phase used to route between top-level windows. */
+  projectPhase: ProjectPhase;
+  /** Which top-level window the app should show for the current project. */
+  workspaceScreen: WorkspaceScreen;
 
   // Actions
   /** Load media for editing. Pass `words` to skip Whisper and use that transcript. */
@@ -207,8 +226,12 @@ interface EditorState {
   adjustWordBounds: (id: number, start: number, end: number) => void;
   /** Insert a scene boundary at the playhead. */
   splitAtPlayhead: () => boolean;
+  /** Insert a scene boundary at an arbitrary time. */
+  splitAtTime: (time: number) => boolean;
   /** Remove a scene boundary by id (join adjacent clips). */
   removeSceneBoundary: (id: number) => void;
+  /** Convert a suggested time range into a selectable clip segment. */
+  createClipFromRange: (range: TimeRange) => boolean;
   /**
    * Move one edge of a kept region from `from` to `to` (original-media times).
    * `edge` names the side that stays kept ("in" = the clip to the right of the
@@ -235,6 +258,12 @@ interface EditorState {
   togglePlayback: () => void;
   setExportUrl: (url: string | null) => void;
   setExportOpen: (open: boolean) => void;
+  setExportPreviewAspectRatio: (ratio: VideoExportAspectRatio | null) => void;
+  setExportPreviewLayout: (layout: VideoExportLayout) => void;
+  setAiClipSuggestions: (suggestions: ClipSuggestion[]) => void;
+  clearAiClipSuggestions: () => void;
+  setAiClipPreviewRange: (range: TimeRange | null) => void;
+  previewAiClip: (range: TimeRange) => void;
   reset: () => void;
 }
 
@@ -312,15 +341,35 @@ function pushEdit(
   const s = get();
   if (s.gestureActive) {
     // Coalesce into the snapshot already pushed by beginGesture.
-    set({ future: [], ...next });
+    set(withWorkflow(s, { future: [], ...next }));
   } else {
-    set({
+    set(
+      withWorkflow(s, {
       past: pushHistory(s.past, snapshotOf(s)),
       future: [],
       ...next,
-    });
+      })
+    );
   }
   bumpAutosave();
+}
+
+function withWorkflow(
+  base: EditorState,
+  next: Partial<EditorState>
+): Partial<EditorState> {
+  const snapshot = { ...base, ...next };
+  const { projectPhase, workspaceScreen } = deriveWorkflow({
+    status: snapshot.status,
+    aiClipSuggestions: snapshot.aiClipSuggestions,
+    selectedClipIndex: snapshot.selectedClipIndex,
+    hasVideo: snapshot.videoFile !== null,
+  });
+  return {
+    ...next,
+    projectPhase,
+    workspaceScreen,
+  };
 }
 
 export const useEditorStore = create<EditorState>((set, get) => ({
@@ -361,6 +410,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
   exportUrl: null,
   exportOpen: false,
+  exportPreviewAspectRatio: null,
+  exportPreviewLayout: "fill",
+  aiClipSuggestions: [],
+  aiClipPreviewRange: null,
+  projectPhase: "idle",
+  workspaceScreen: "projects",
 
   loadVideo: (file, options) => {
     const kind = detectMediaKind(file);
@@ -373,7 +428,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const speakers = imported
       ? speakersFromWords(imported, options?.speakers ?? [])
       : [];
-    set({
+    set(
+      withWorkflow(get(), {
       videoFile: file,
       mediaUrl: URL.createObjectURL(file),
       mediaKind: kind,
@@ -407,7 +463,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       waveform: null,
       hasAudio: false,
       duration: 0,
-    });
+      exportPreviewAspectRatio: null,
+      exportPreviewLayout: "fill",
+      aiClipSuggestions: [],
+      aiClipPreviewRange: null,
+      })
+    );
     // Funnel step between opening the app and getting a transcript. `kind` and
     // `source` are fixed vocabulary — nothing derived from the file itself.
     trackEvent("project_created", {
@@ -425,7 +486,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const manualCuts = record.manualCuts ?? [];
     const sceneBoundaries = record.sceneBoundaries ?? [];
     const speakers = speakersFromWords(record.words, record.speakers ?? []);
-    set({
+    set(
+      withWorkflow(get(), {
       videoFile: file,
       mediaUrl: URL.createObjectURL(file),
       mediaKind: record.mediaKind,
@@ -457,9 +519,14 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       playing: false,
       exportUrl: null,
       exportOpen: false,
+      exportPreviewAspectRatio: null,
+      exportPreviewLayout: "fill",
+      aiClipSuggestions: [],
+      aiClipPreviewRange: null,
       waveform: null,
       hasAudio: false,
-    });
+      })
+    );
   },
 
   removeProject: async (id) => {
@@ -492,14 +559,16 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       hasAudio: audio !== null,
     }),
   setStatus: (status) => {
-    set({ status });
+    set((s) => withWorkflow(s, { status }));
     if (status === "ready") bumpAutosave();
   },
   setProgress: (progress) => set({ progress }),
   setPartialText: (partialText) => set({ partialText }),
-  setError: (message) => set({ status: "error", error: message }),
+  setError: (message) =>
+    set((s) => withWorkflow(s, { status: "error", error: message })),
   setWords: (words, speakers) => {
-    set({
+    set(
+      withWorkflow(get(), {
       words,
       speakers: speakersFromWords(words, speakers ?? []),
       manualCuts: [],
@@ -509,7 +578,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       selectedClipIndex: null,
       selectedCutIndex: null,
       selectedWordIds: [],
-    });
+      aiClipSuggestions: [],
+      aiClipPreviewRange: null,
+      })
+    );
     if (get().status === "ready") bumpAutosave();
   },
   importWords: (words, speakers) => {
@@ -524,7 +596,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     }
     // Stop Whisper if it was still running.
     void import("@/hooks/useTranscriber").then((m) => m.cancelTranscription());
-    set({
+    set(
+      withWorkflow(get(), {
       words,
       speakers: speakersFromWords(words, speakers ?? []),
       manualCuts: [],
@@ -540,7 +613,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       progress: { message: "", value: null },
       skipTranscription: true,
       source: "import",
-    });
+      aiClipSuggestions: [],
+      aiClipPreviewRange: null,
+      })
+    );
     bumpAutosave();
   },
 
@@ -791,11 +867,16 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   splitAtPlayhead: () => {
     const s = get();
     const t = s.currentTime;
+    return get().splitAtTime(t);
+  },
+
+  splitAtTime: (time) => {
+    const s = get();
     const cuts = getCutRanges(s.words, s.duration, s.manualCuts);
-    if (!canSplitAt(t, s.duration, cuts, s.sceneBoundaries)) return false;
+    if (!canSplitAt(time, s.duration, cuts, s.sceneBoundaries)) return false;
     const id = s.nextBoundaryId;
     pushEdit(get, set, {
-      sceneBoundaries: [...s.sceneBoundaries, { id, time: t }].sort(
+      sceneBoundaries: [...s.sceneBoundaries, { id, time }].sort(
         (a, b) => a.time - b.time
       ),
       nextBoundaryId: id + 1,
@@ -811,6 +892,52 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       selectedClipIndex: null,
       selectedCutIndex: null,
     });
+  },
+
+  createClipFromRange: (range) => {
+    const s = get();
+    if (s.duration <= 0) return false;
+    const start = Math.max(0, Math.min(range.start, s.duration));
+    const end = Math.max(0, Math.min(range.end, s.duration));
+    if (end - start <= 1e-4) return false;
+
+    const cuts = getCutRanges(s.words, s.duration, s.manualCuts);
+    const nextBoundaries = [...s.sceneBoundaries];
+    let nextBoundaryId = s.nextBoundaryId;
+    const addBoundary = (time: number): boolean => {
+      if (time <= 1e-3 || time >= s.duration - 1e-3) return true;
+      if (!canSplitAt(time, s.duration, cuts, nextBoundaries)) return false;
+      nextBoundaries.push({ id: nextBoundaryId++, time });
+      return true;
+    };
+
+    if (!addBoundary(start)) return false;
+    if (!addBoundary(end)) return false;
+
+    nextBoundaries.sort((a, b) => a.time - b.time);
+    const clips = getClipSegments(
+      getKeepRanges(cuts, s.duration),
+      nextBoundaries
+    );
+    const selectedClip =
+      clips.find(
+        (c) =>
+          c.start <= start + 1e-3 &&
+          c.end >= end - 1e-3 &&
+          Math.abs(c.start - start) < 1e-3 &&
+          Math.abs(c.end - end) < 1e-3
+      ) ??
+      clips.find((c) => c.start <= start + 1e-3 && c.end >= end - 1e-3) ??
+      null;
+
+    pushEdit(get, set, {
+      sceneBoundaries: nextBoundaries,
+      nextBoundaryId,
+      selectedClipIndex: selectedClip?.index ?? null,
+      selectedCutIndex: null,
+      selectedWordIds: [],
+    });
+    return true;
   },
 
   trimEdge: (edge, from, to) => {
@@ -853,16 +980,20 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   setSelectedClipIndex: (selectedClipIndex) =>
-    set({
-      selectedClipIndex,
-      ...(selectedClipIndex != null ? { selectedCutIndex: null } : {}),
-    }),
+    set((s) =>
+      withWorkflow(s, {
+        selectedClipIndex,
+        ...(selectedClipIndex != null ? { selectedCutIndex: null } : {}),
+      })
+    ),
 
   setSelectedCutIndex: (selectedCutIndex) =>
-    set({
-      selectedCutIndex,
-      ...(selectedCutIndex != null ? { selectedClipIndex: null } : {}),
-    }),
+    set((s) =>
+      withWorkflow(s, {
+        selectedCutIndex,
+        ...(selectedCutIndex != null ? { selectedClipIndex: null } : {}),
+      })
+    ),
 
   setSelectedWords: (selectedWordIds) =>
     set({
@@ -899,7 +1030,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       get();
     if (past.length === 0) return;
     const prev = past[past.length - 1];
-    set({
+    set(
+      withWorkflow(get(), {
       words: prev.words,
       speakers: prev.speakers,
       manualCuts: prev.manualCuts,
@@ -913,7 +1045,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       selectedCutIndex: null,
       selectedWordIds: [],
       gestureActive: false,
-    });
+      })
+    );
     bumpAutosave();
   },
   redo: () => {
@@ -921,7 +1054,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       get();
     if (future.length === 0) return;
     const next = future[0];
-    set({
+    set(
+      withWorkflow(get(), {
       words: next.words,
       speakers: next.speakers,
       manualCuts: next.manualCuts,
@@ -932,7 +1066,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       selectedCutIndex: null,
       selectedWordIds: [],
       gestureActive: false,
-    });
+      })
+    );
     bumpAutosave();
   },
   toggleShowDeleted: () => {
@@ -954,6 +1089,20 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     if (!media) return;
     if (media.paused) {
       const cuts = getCutRanges(s.words, s.duration, s.manualCuts);
+      const selectedClip = getSelectedClipSegment(
+        cuts,
+        s.duration,
+        s.sceneBoundaries,
+        s.selectedClipIndex
+      );
+      if (selectedClip) {
+        if (
+          media.currentTime < selectedClip.start ||
+          media.currentTime > selectedClip.end
+        ) {
+          media.currentTime = selectedClip.start;
+        }
+      }
       const cut = cutRangeAt(media.currentTime, cuts);
       if (cut) media.currentTime = cut.end + PLAYHEAD_EPSILON_S;
       if (media.currentTime >= media.duration - 0.05) media.currentTime = 0;
@@ -964,6 +1113,23 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
   setExportUrl: (exportUrl) => set({ exportUrl }),
   setExportOpen: (exportOpen) => set({ exportOpen }),
+  setExportPreviewAspectRatio: (exportPreviewAspectRatio) =>
+    set({ exportPreviewAspectRatio }),
+  setExportPreviewLayout: (exportPreviewLayout) =>
+    set({ exportPreviewLayout }),
+  setAiClipSuggestions: (aiClipSuggestions) =>
+    set((s) => withWorkflow(s, { aiClipSuggestions })),
+  clearAiClipSuggestions: () => set((s) => withWorkflow(s, { aiClipSuggestions: [] })),
+  setAiClipPreviewRange: (aiClipPreviewRange) =>
+    set({ aiClipPreviewRange }),
+  previewAiClip: (aiClipPreviewRange) => {
+    set({ aiClipPreviewRange });
+    const media = get().videoEl;
+    if (media) {
+      media.currentTime = aiClipPreviewRange.start;
+      void media.play();
+    }
+  },
 
   reset: () => {
     const { mediaUrl, exportUrl } = get();
@@ -1001,6 +1167,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       playing: false,
       exportUrl: null,
       exportOpen: false,
+      exportPreviewAspectRatio: null,
+      exportPreviewLayout: "fill",
+      aiClipSuggestions: [],
+      aiClipPreviewRange: null,
+      projectPhase: "idle",
+      workspaceScreen: "projects",
     });
   },
 }));

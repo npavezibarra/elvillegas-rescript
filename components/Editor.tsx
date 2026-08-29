@@ -17,7 +17,8 @@ import { useTranscriber } from "@/hooks/useTranscriber";
 import { detectMediaKind, MEDIA_ACCEPT } from "@/lib/media";
 import TopBar from "./TopBar";
 import DesktopAppBanner from "./DesktopAppBanner";
-import UploadScreen from "./UploadScreen";
+import ProjectsScreen from "./ProjectsScreen";
+import ClipsScreen from "./ClipsScreen";
 import TranscriptPanel from "./TranscriptPanel";
 import MediaPreview from "./MediaPreview";
 import Timeline from "./Timeline";
@@ -132,6 +133,7 @@ function EditorWorkspace() {
 export default function Editor() {
   const { t } = useI18n();
   const status = useEditorStore((s) => s.status);
+  const workspaceScreen = useEditorStore((s) => s.workspaceScreen);
   const videoFile = useEditorStore((s) => s.videoFile);
   const skipTranscription = useEditorStore((s) => s.skipTranscription);
   const loadVideo = useEditorStore((s) => s.loadVideo);
@@ -142,6 +144,13 @@ export default function Editor() {
   const undo = useEditorStore((s) => s.undo);
   const redo = useEditorStore((s) => s.redo);
   const setExportOpen = useEditorStore((s) => s.setExportOpen);
+  const setSelectedClipIndex = useEditorStore((s) => s.setSelectedClipIndex);
+  const setSelectedCutIndex = useEditorStore((s) => s.setSelectedCutIndex);
+  const setSelectedWords = useEditorStore((s) => s.setSelectedWords);
+  const setAiClipPreviewRange = useEditorStore((s) => s.setAiClipPreviewRange);
+  const clearAiClipSuggestions = useEditorStore((s) => s.clearAiClipSuggestions);
+  const { locale } = useI18n();
+  const isSpanish = locale === "es";
 
   const [modeTransitioning, setModeTransitioning] = useState(false);
   const wasIdle = useRef(status === "idle");
@@ -348,26 +357,42 @@ export default function Editor() {
   return (
     <div className="relative flex h-dvh flex-col overflow-hidden bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
       <DesktopAppBanner />
-      {status === "idle" ? (
-        <>
-          {isElectron && <TopBar>
-            <ModelSelector groupLabel={t("model.transcriptSource")}>
-              {MODEL_ORDER.map((id) => (
-                <ModelOption key={id} id={id} />
-              ))}
-              <ModelOptionSeparator />
-              <LanguageSection />
-              <ModelOptionSeparator />
-              <ImportTranscriptOption />
-            </ModelSelector>
-            <div className="mx-1 h-5 w-px bg-zinc-200 dark:bg-zinc-700" />
-            <SettingsMenu />
-          </TopBar>}
-          <UploadScreen onFile={loadVideo} />
-        </>
-      ) : (
+      {workspaceScreen === "editor" ? (
         <>
           <TopBar>
+            {videoFile && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedClipIndex(null);
+                    setSelectedCutIndex(null);
+                    setSelectedWords([]);
+                    setAiClipPreviewRange(null);
+                  }}
+                  className="hidden h-8 items-center rounded-full border border-zinc-200 bg-white px-3 text-[13px] font-medium text-zinc-600 transition hover:bg-zinc-100 hover:text-zinc-900 sm:inline-flex dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+                >
+                  {isSpanish ? "Volver a clips" : "Back to clips"}
+                </button>
+                <div className="mx-1 h-5 w-px bg-zinc-200 dark:bg-zinc-700" />
+              </>
+            )}
+            {videoFile && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedClipIndex(null);
+                  setSelectedCutIndex(null);
+                  setSelectedWords([]);
+                  setAiClipPreviewRange(null);
+                  clearAiClipSuggestions();
+                }}
+                className="flex h-8 items-center rounded-full bg-zinc-900 px-3 text-[13px] font-medium text-white transition hover:bg-zinc-700 cursor-pointer dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+              >
+                {isSpanish ? "Volver a proyectos" : "Back to projects"}
+              </button>
+            )}
+            <div className="mx-1 h-5 w-px bg-zinc-200 dark:bg-zinc-700" />
             <button
               onClick={undo}
               disabled={!canUndo}
@@ -398,6 +423,25 @@ export default function Editor() {
           </TopBar>
           <EditorWorkspace />
           <Timeline />
+        </>
+      ) : workspaceScreen === "clips" ? (
+        <ClipsScreen />
+      ) : (
+        <>
+          {isElectron && <TopBar>
+            <ModelSelector groupLabel={t("model.transcriptSource")}>
+              {MODEL_ORDER.map((id) => (
+                <ModelOption key={id} id={id} />
+              ))}
+              <ModelOptionSeparator />
+              <LanguageSection />
+              <ModelOptionSeparator />
+              <ImportTranscriptOption />
+            </ModelSelector>
+            <div className="mx-1 h-5 w-px bg-zinc-200 dark:bg-zinc-700" />
+            <SettingsMenu />
+          </TopBar>}
+          <ProjectsScreen onFile={loadVideo} />
         </>
       )}
       {modeTransitioning && (
