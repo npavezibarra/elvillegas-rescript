@@ -401,8 +401,12 @@ export default function Timeline() {
     if (!el) return;
     const px = (currentTime - timelineBase) * pps;
     if (px < el.scrollLeft + 24 || px > el.scrollLeft + width - 96) {
-      el.scrollLeft = Math.max(0, px - 96);
-      autoScrollRef.current = el.scrollLeft;
+      const nextScrollLeft = Math.max(0, px - 96);
+      el.scrollLeft = nextScrollLeft;
+      // Keep React state aligned with the DOM scroll position so overlays
+      // (playhead, clip outlines, wave labels) do not drift by one follow step.
+      setScrollLeft(nextScrollLeft);
+      autoScrollRef.current = nextScrollLeft;
     }
   }, [currentTime, playing, pps, width, timelineBase]);
 
