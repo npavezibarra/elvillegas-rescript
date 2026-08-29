@@ -86,31 +86,29 @@ export default function ClipsScreen() {
   const { locale } = useI18n();
   const suggestions = useEditorStore((s) => s.aiClipSuggestions);
   const videoFile = useEditorStore((s) => s.videoFile);
-  const createClipFromRange = useEditorStore((s) => s.createClipFromRange);
   const setSelectedWords = useEditorStore((s) => s.setSelectedWords);
   const setAiClipPreviewRange = useEditorStore((s) => s.setAiClipPreviewRange);
   const setWorkspaceScreen = useEditorStore((s) => s.setWorkspaceScreen);
+  const setSelectedClipIndex = useEditorStore((s) => s.setSelectedClipIndex);
+  const setSelectedCutIndex = useEditorStore((s) => s.setSelectedCutIndex);
   const isSpanish = locale === "es";
 
   const openClip = useCallback(
     (clip: ClipSuggestion) => {
-      const created = createClipFromRange({ start: clip.start, end: clip.end });
-      if (!created) {
-        alert(
-          isSpanish
-            ? "No pudimos crear ese clip. Revisa que no se superponga con otros cortes."
-          : "We could not create that clip. Check whether it overlaps an existing cut."
-        );
-        return;
-      }
-      setAiClipPreviewRange(null);
+      // Opening an LLM proposal must not mutate the timeline. It is a focused
+      // editing view of that original-media range, even if other cuts exist.
+      setSelectedClipIndex(null);
+      setSelectedCutIndex(null);
+      setAiClipPreviewRange({ start: clip.start, end: clip.end });
       setSelectedWords([]);
+      setWorkspaceScreen("editor");
     },
     [
-      createClipFromRange,
-      isSpanish,
       setAiClipPreviewRange,
+      setSelectedClipIndex,
+      setSelectedCutIndex,
       setSelectedWords,
+      setWorkspaceScreen,
     ]
   );
 

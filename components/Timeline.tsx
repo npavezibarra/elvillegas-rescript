@@ -29,6 +29,7 @@ import {
   formatTime,
   getActiveSceneBoundaries,
   getClipSegments,
+  getCutRanges,
   getEditedDuration,
   getKeepRanges,
   getSelectedClipSegment,

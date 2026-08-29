@@ -273,6 +273,11 @@ function bumpAutosave() {
   void import("./autosave").then((m) => m.scheduleProjectAutosave());
 }
 
+function flushAutosave() {
+  // Keep the save path lazy for the same circular-dependency reason.
+  void import("./autosave").then((m) => m.flushProjectAutosave());
+}
+
 /**
  * How many undo steps to keep.
  *
@@ -336,6 +341,7 @@ function pushEdit(
       | "selectedWordIds"
       | "nextManualCutId"
       | "nextBoundaryId"
+      | "workspaceScreen"
     >
   >
 ) {
@@ -905,6 +911,27 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     if (end - start <= 1e-4) return false;
 
     const cuts = getCutRanges(s.words, s.duration, s.manualCuts);
+    const existingClips = getClipSegments(
+      getKeepRanges(cuts, s.duration),
+      s.sceneBoundaries
+    );
+    const existingClip =
+      existingClips.find(
+        (c) =>
+          Math.abs(c.start - start) < 1e-3 && Math.abs(c.end - end) < 1e-3
+      ) ??
+      existingClips.find((c) => c.start <= start + 1e-3 && c.end >= end - 1e-3) ??
+      null;
+    if (existingClip) {
+      pushEdit(get, set, {
+        selectedClipIndex: existingClip.index,
+        selectedCutIndex: null,
+        selectedWordIds: [],
+        workspaceScreen: "editor",
+      });
+      return true;
+    }
+
     const nextBoundaries = [...s.sceneBoundaries];
     let nextBoundaryId = s.nextBoundaryId;
     const addBoundary = (time: number): boolean => {
@@ -1100,7 +1127,15 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         s.duration,
         s.sceneBoundaries,
         s.selectedClipIndex
-      );
+      ) ??
+        (s.aiClipPreviewRange
+          ? {
+              id: "ai-preview",
+              start: s.aiClipPreviewRange.start,
+              end: s.aiClipPreviewRange.end,
+              index: -1,
+            }
+          : null);
       if (selectedClip) {
         if (
           media.currentTime < selectedClip.start ||
@@ -1131,9 +1166,16 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         workspaceScreen: aiClipSuggestions.length > 0 ? "clips" : s.workspaceScreen,
       });
       bumpAutosave();
+      flushAutosave();
       return next;
     }),
-  clearAiClipSuggestions: () => set((s) => withWorkflow(s, { aiClipSuggestions: [] })),
+  clearAiClipSuggestions: () =>
+    set((s) => {
+      const next = withWorkflow(s, { aiClipSuggestions: [] });
+      bumpAutosave();
+      flushAutosave();
+      return next;
+    }),
   setAiClipPreviewRange: (aiClipPreviewRange) =>
     set({ aiClipPreviewRange }),
   previewAiClip: (aiClipPreviewRange) => {

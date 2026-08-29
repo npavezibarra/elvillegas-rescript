@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 import { useEditorStore } from "@/lib/store";
 import { trackEvent } from "@/lib/telemetry";
-import { formatTime, getEditedDuration, getKeepRanges } from "@/lib/edits";
+import { formatTime, getKeepRanges, mergeCutRanges } from "@/lib/edits";
 import {
   exportAudio,
   exportVideo,
@@ -36,6 +36,7 @@ import {
 } from "@/lib/serializeTimeline";
 import { AAF_MAX_CLIPS } from "@/lib/aaf/patchAaf";
 import { useCutRanges } from "@/hooks/useCutRanges";
+import { useSelectedClipSegment } from "@/hooks/useSelectedClipSegment";
 import { useI18n } from "./I18nProvider";
 import { localizeRuntimeMessage } from "@/lib/i18n";
 import { en } from "@/lib/i18n/messages/en";
@@ -125,14 +126,45 @@ export default function ExportDialog() {
   const [error, setError] = useState<string | null>(null);
 
   const cuts = useCutRanges();
+  const selectedClip = useSelectedClipSegment();
+  const exportScope = useMemo(
+    () =>
+      selectedClip
+        ? { start: selectedClip.start, end: selectedClip.end }
+        : { start: 0, end: duration },
+    [duration, selectedClip]
+  );
+  const keeps = useMemo(
+    () =>
+      getKeepRanges(cuts, duration)
+        .map((range) => ({
+          start: Math.max(range.start, exportScope.start),
+          end: Math.min(range.end, exportScope.end),
+        }))
+        .filter((range) => range.end - range.start > 1e-4),
+    [cuts, duration, exportScope]
+  );
   const editedDuration = useMemo(
-    () => getEditedDuration(cuts, duration),
-    [cuts, duration]
+    () => keeps.reduce((total, range) => total + range.end - range.start, 0),
+    [keeps]
   );
-  const keepRangeCount = useMemo(
-    () => getKeepRanges(cuts, duration).length,
-    [cuts, duration]
+  const exportCuts = useMemo(
+    () =>
+      mergeCutRanges(
+        [
+          ...cuts,
+          ...(exportScope.start > 1e-4
+            ? [{ start: 0, end: exportScope.start }]
+            : []),
+          ...(exportScope.end < duration - 1e-4
+            ? [{ start: exportScope.end, end: duration }]
+            : []),
+        ],
+        duration
+      ),
+    [cuts, duration, exportScope]
   );
+  const keepRangeCount = keeps.length;
   const aafOverCap =
     timelineFormat === "aaf" && keepRangeCount > AAF_MAX_CLIPS;
   const exporting = status === "exporting";
@@ -250,7 +282,6 @@ export default function ExportDialog() {
     setProgress(0);
     setStatus("exporting");
     try {
-      const keeps = getKeepRanges(cuts, duration);
       const blob =
         activeTab === "audio"
           ? await exportAudio(videoFile, keeps, editedDuration, setProgress, {
@@ -291,8 +322,7 @@ export default function ExportDialog() {
     activeTab,
     isAudioProject,
     hasAudioTrack,
-    cuts,
-    duration,
+    keeps,
     editedDuration,
     audioFormat,
     videoFormat,
@@ -311,7 +341,7 @@ export default function ExportDialog() {
       try {
         downloadTranscript(words, format, baseName, {
           duration,
-          cuts,
+          cuts: exportCuts,
           speakers,
         });
         setError(null);
@@ -328,7 +358,7 @@ export default function ExportDialog() {
       subtitleFormat,
       baseName,
       duration,
-      cuts,
+      exportCuts,
     ]
   );
 
@@ -337,7 +367,6 @@ export default function ExportDialog() {
     setTimelineBusy(true);
     setError(null);
     try {
-      const keeps = getKeepRanges(cuts, duration);
       const videoEl = useEditorStore.getState().videoEl;
       const width =
         videoEl && "videoWidth" in videoEl
@@ -366,7 +395,7 @@ export default function ExportDialog() {
     }
   }, [
     videoFile,
-    cuts,
+    keeps,
     duration,
     timelineFormat,
     timelineFrameRate,
@@ -479,8 +508,8 @@ export default function ExportDialog() {
           activeTab === "audio" ||
           activeTab === "timeline") && (
           <div className="mb-5 grid grid-cols-3 gap-2 text-center">
-            <Stat label={t("export.statOriginal")} value={formatTime(duration)} />
-            <Stat label={t("export.statCuts")} value={String(cuts.length)} />
+            <Stat label={t("export.statOriginal")} value={formatTime(exportScope.end - exportScope.start)} />
+            <Stat label={t("export.statCuts")} value={String(exportCuts.length)} />
             <Stat label={t("export.statEdited")} value={formatTime(editedDuration)} accent />
           </div>
         )}

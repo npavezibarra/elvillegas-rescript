@@ -47,7 +47,7 @@ export async function flushProjectAutosave(): Promise<void> {
 
 async function writeSnapshot() {
   const s = useEditorStore.getState();
-  if (s.status !== "ready") return;
+  if (s.status !== "ready" && s.aiClipSuggestions.length === 0) return;
   if (!s.videoFile || !s.mediaKind) return;
   if (
     s.words.length === 0 &&
