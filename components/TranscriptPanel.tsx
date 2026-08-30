@@ -1,19 +1,30 @@
 "use client";
 
-import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, {
+  memo,
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   ArrowDown,
   ArrowUp,
   ArrowUpFromLine,
   ChevronLast,
+  ChevronDown,
   Eye,
   EyeOff,
   Merge,
   Pencil,
   RotateCcw,
   Scissors,
+  Trash2,
   VolumeOff,
   X,
+  type LucideIcon,
 } from "lucide-react";
 import { FloatingPortal } from "@floating-ui/react";
 import { useEditorStore } from "@/lib/store";
@@ -25,7 +36,7 @@ import {
   parseTranscriptFile,
   TRANSCRIPT_ACCEPT,
 } from "@/lib/parseTranscript";
-import type { Word } from "@/lib/types";
+import type { TimeRange, Word } from "@/lib/types";
 import TranscriptScrollIndicator from "./TranscriptScrollIndicator";
 import SpeakerLabel, {
   SelectionSpeakerButton,
@@ -47,6 +58,8 @@ import { findActiveWordId, groupWordsBySpeaker } from "@/lib/transcript";
 import { isTypingTarget } from "@/lib/keyboard";
 import { useI18n } from "./I18nProvider";
 import { localizeRuntimeMessage } from "@/lib/i18n";
+import Popover, { PopoverContent, PopoverTrigger } from "./Popover";
+import { buildPauseMarkers } from "@/lib/pauseMarkers";
 
 const WordSpan = memo(function WordSpan({
   word,
@@ -85,6 +98,108 @@ const WordSpan = memo(function WordSpan({
   );
 });
 
+function pauseLabel(duration: number): string {
+  return `${duration.toFixed(2)}s`;
+}
+
+const PauseMenuItem = memo(function PauseMenuItem({
+  icon: Icon,
+  label,
+  danger,
+  onClick,
+}: {
+  icon: LucideIcon;
+  label: string;
+  danger?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      onClick={onClick}
+      className={`flex w-full cursor-pointer items-center gap-2.5 px-2.5 py-2 text-left text-[13px] transition ${
+        danger
+          ? "text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/40"
+          : "text-zinc-700 hover:bg-zinc-50 dark:text-zinc-200 dark:hover:bg-zinc-800/80"
+      }`}
+    >
+      <span className="shrink-0 text-zinc-400 dark:text-zinc-500">
+        <Icon size={14} />
+      </span>
+      <span className="flex-1">{label}</span>
+    </button>
+  );
+});
+
+const PauseMarker = memo(function PauseMarker({
+  duration,
+  ranges,
+  onRemovePause,
+  onRemoveAllPauses,
+}: {
+  duration: number;
+  ranges: TimeRange[];
+  onRemovePause: () => void;
+  onRemoveAllPauses: () => void;
+}) {
+  const { t } = useI18n();
+  const [open, setOpen] = useState(false);
+  const panelId = useId();
+  const label = pauseLabel(duration);
+  const removePause = useCallback(() => {
+    if (ranges.length === 0) return;
+    onRemovePause();
+    setOpen(false);
+  }, [onRemovePause, ranges.length]);
+  const removeAllPauses = useCallback(() => {
+    onRemoveAllPauses();
+    setOpen(false);
+  }, [onRemoveAllPauses]);
+
+  const trigger = (
+    <button
+      type="button"
+      aria-haspopup="menu"
+      aria-expanded={open}
+      aria-controls={panelId}
+      title={t("transcript.pause", { duration: label })}
+      onMouseDown={(e) => e.preventDefault()}
+      onClick={() => setOpen((v) => !v)}
+      className="mx-1 inline-flex select-none items-center gap-1 rounded-md bg-zinc-700/80 px-2 py-0.5 text-[10px] font-medium tabular-nums tracking-tight text-white/90 shadow-sm ring-1 ring-white/10 transition hover:bg-zinc-600 hover:ring-white/20 dark:bg-zinc-200 dark:text-zinc-900 dark:hover:bg-white"
+    >
+      {label}
+      <ChevronDown size={10} className="opacity-70" />
+    </button>
+  );
+
+  return (
+    <Popover open={open} onOpenChange={setOpen} placement="top-start">
+      <span className="inline-flex align-middle">
+        <PopoverTrigger>{trigger}</PopoverTrigger>
+        <PopoverContent
+          id={panelId}
+          role="menu"
+          aria-label={t("transcript.pauseMenu")}
+          className="z-40 w-56 overflow-hidden py-1"
+        >
+          <PauseMenuItem
+            icon={Trash2}
+            label={t("transcript.removePause")}
+            onClick={removePause}
+          />
+          <PauseMenuItem
+            icon={Trash2}
+            label={t("transcript.removeAllPauses")}
+            danger
+            onClick={removeAllPauses}
+          />
+        </PopoverContent>
+      </span>
+    </Popover>
+  );
+});
+
 /**
  * Descript-style edit boundary: the "|" between two clips created by a split.
  * Click it to join them back together (the inverse of Split / S).
@@ -120,6 +235,7 @@ export default function TranscriptPanel() {
   const words = useEditorStore((s) => s.words);
   const sceneBoundaries = useEditorStore((s) => s.sceneBoundaries);
   const duration = useEditorStore((s) => s.duration);
+  const manualCuts = useEditorStore((s) => s.manualCuts);
   const status = useEditorStore((s) => s.status);
   const progress = useEditorStore((s) => s.progress);
   const partialText = useEditorStore((s) => s.partialText);
@@ -128,6 +244,7 @@ export default function TranscriptPanel() {
   const toggleShowDeleted = useEditorStore((s) => s.toggleShowDeleted);
   const deleteWords = useEditorStore((s) => s.deleteWords);
   const restoreWords = useEditorStore((s) => s.restoreWords);
+  const cutRanges = useEditorStore((s) => s.cutRanges);
   const correctWords = useEditorStore((s) => s.correctWords);
   const importWords = useEditorStore((s) => s.importWords);
   const removeSceneBoundary = useEditorStore((s) => s.removeSceneBoundary);
@@ -229,6 +346,50 @@ export default function TranscriptPanel() {
   const turns = useMemo(
     () => groupWordsBySpeaker(transcriptWords),
     [transcriptWords]
+  );
+  const turnIndexByStartId = useMemo(
+    () => new Map(turns.map((turn, index) => [turn.words[0]!.id, index] as const)),
+    [turns]
+  );
+  const visibleTurns = useMemo(
+    () =>
+      turns.map((turn) => ({
+        ...turn,
+        words: showDeleted ? turn.words : turn.words.filter((w) => !cutOutIds.has(w.id)),
+      })),
+    [turns, showDeleted, cutOutIds]
+  );
+  const visibleWords = useMemo(
+    () => visibleTurns.flatMap((turn) => turn.words),
+    [visibleTurns]
+  );
+  const pauseMarkers = useMemo(
+    () => buildPauseMarkers(words, duration, manualCuts, visibleWords),
+    [words, duration, manualCuts, visibleWords]
+  );
+  const pauseMarkersByWordId = useMemo(
+    () => {
+      const map = new Map<
+        number,
+        { before: typeof pauseMarkers; after: typeof pauseMarkers }
+      >();
+      for (const pause of pauseMarkers) {
+        const bucket =
+          map.get(pause.anchorWordId) ??
+          {
+            before: [],
+            after: [],
+          };
+        bucket[pause.side].push(pause);
+        map.set(pause.anchorWordId, bucket);
+      }
+      return map;
+    },
+    [pauseMarkers]
+  );
+  const allPauseRanges = useMemo(
+    () => pauseMarkers.flatMap((pause) => pause.ranges),
+    [pauseMarkers]
   );
 
   const deletedCount = useMemo(() => cutOutIds.size, [cutOutIds]);
@@ -459,13 +620,12 @@ export default function TranscriptPanel() {
 
           {status === "ready" && (
             <div className="transcript-words selection:bg-transparent">
-              {turns.map((turn) => {
-                const visible = showDeleted
-                  ? turn.words
-                  : turn.words.filter((w) => !cutOutIds.has(w.id));
+              {visibleTurns.map((turn) => {
+                const visible = turn.words;
                 if (visible.length === 0) return null;
+                const turnIndex = turnIndexByStartId.get(turn.words[0].id) ?? -1;
                 // First turn in the full word list has no previous speaker to borrow from.
-                const canMove = turn.words[0].id !== transcriptWords[0]?.id;
+                const canMove = turnIndex > 0;
                 return (
                   <div key={`${turn.speaker}-${turn.words[0].id}`} className="mb-7">
                     <SpeakerLabel
@@ -475,10 +635,20 @@ export default function TranscriptPanel() {
                       canMove={canMove}
                     />
                     <p className="select-text text-[15px] leading-8">
-                      {visible.map((w) => {
-                        const split = splitBeforeWordId.get(w.id);
+              {visible.map((w) => {
+                const split = splitBeforeWordId.get(w.id);
+                        const pauseGroup = pauseMarkersByWordId.get(w.id);
                         return (
                           <React.Fragment key={w.id}>
+                            {pauseGroup?.before.map((pause, index) => (
+                              <PauseMarker
+                                key={`pause-before-${w.id}-${index}-${pause.ranges[0]!.start.toFixed(3)}`}
+                                duration={pause.duration}
+                                ranges={pause.ranges}
+                                onRemovePause={() => cutRanges(pause.ranges)}
+                                onRemoveAllPauses={() => cutRanges(allPauseRanges)}
+                              />
+                            ))}
                             {split && (
                               <SplitMarker boundaryId={split.id} onJoin={removeSceneBoundary} />
                             )}
@@ -488,6 +658,15 @@ export default function TranscriptPanel() {
                               active={w.id === activeWordId}
                               onClick={onWordClick}
                             />
+                            {pauseGroup?.after.map((pause, index) => (
+                              <PauseMarker
+                                key={`pause-after-${w.id}-${index}-${pause.ranges[0]!.start.toFixed(3)}`}
+                                duration={pause.duration}
+                                ranges={pause.ranges}
+                                onRemovePause={() => cutRanges(pause.ranges)}
+                                onRemoveAllPauses={() => cutRanges(allPauseRanges)}
+                              />
+                            ))}
                           </React.Fragment>
                         );
                       })}

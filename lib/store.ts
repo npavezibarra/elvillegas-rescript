@@ -71,7 +71,11 @@ import {
 import {
   CAPTION_LAYER_ID,
   clampLayerTransform,
+  clampVideoCrop,
+  clampVideoTransform,
   createCaptionLayer,
+  DEFAULT_VIDEO_CROP,
+  DEFAULT_VIDEO_TRANSFORM,
   layerTiming,
   moveLayer,
   withLayerTiming,
@@ -83,6 +87,11 @@ interface PendingTranscript {
   speakers?: SpeakerInfo[];
 }
 
+interface AiClipDurationRange {
+  min: string;
+  max: string;
+}
+
 export interface CaptionPosition {
   /** Center point as a percentage of the video frame. */
   x: number;
@@ -90,6 +99,7 @@ export interface CaptionPosition {
 }
 
 const DEFAULT_CAPTION_POSITION: CaptionPosition = { x: 50, y: 82 };
+const DEFAULT_AI_CLIP_DURATION_RANGE: AiClipDurationRange = { min: "0", max: "" };
 
 interface EditorState {
   // Media
@@ -173,10 +183,16 @@ interface EditorState {
   exportPreviewLayout: VideoExportLayout;
   showCaptions: boolean;
   captionPosition: CaptionPosition;
+  /** Placement of the primary video inside the preview and export frame. */
+  videoTransform: LayerTransform;
+  videoCrop: LayerTransform;
+  videoCropAspectRatio: number | null;
+  videoSelected: boolean;
   /** Bottom-to-top visual stack rendered over the video frame. */
   layers: EditorLayer[];
   selectedLayerId: string | null;
   aiClipSuggestions: ClipSuggestion[];
+  aiClipDurationRange: AiClipDurationRange;
   aiClipPreviewRange: TimeRange | null;
   /** Coarse-grained product phase used to route between top-level windows. */
   projectPhase: ProjectPhase;
@@ -286,8 +302,19 @@ interface EditorState {
   setExportPreviewLayout: (layout: VideoExportLayout) => void;
   setShowCaptions: (showCaptions: boolean) => void;
   setCaptionPosition: (position: CaptionPosition) => void;
+  updateVideoTransform: (transform: Partial<LayerTransform>) => void;
+  updateVideoCrop: (
+    transform: Partial<LayerTransform>,
+    cropAspectRatio?: number
+  ) => void;
+  updateImageCrop: (
+    id: string,
+    transform: Partial<LayerTransform>,
+    cropAspectRatio?: number
+  ) => void;
+  setVideoSelected: (selected: boolean) => void;
   addTextLayer: (text?: string) => string;
-  addImageLayer: (src: string, name?: string) => string;
+  addImageLayer: (src: string, name?: string, aspectRatio?: number) => string;
   updateLayerTransform: (id: string, transform: Partial<LayerTransform>) => void;
   updateLayerTiming: (id: string, timing: Partial<{ start: number; end: number }>) => void;
   updateTextLayer: (
@@ -300,6 +327,7 @@ interface EditorState {
   setWorkspaceScreen: (screen: WorkspaceScreen) => void;
   setAiClipSuggestions: (suggestions: ClipSuggestion[]) => void;
   clearAiClipSuggestions: () => void;
+  setAiClipDurationRange: (range: AiClipDurationRange) => void;
   setAiClipPreviewRange: (range: TimeRange | null) => void;
   previewAiClip: (range: TimeRange) => void;
   reset: () => void;
@@ -454,13 +482,18 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
   exportUrl: null,
   exportOpen: false,
-  exportPreviewAspectRatio: null,
+  exportPreviewAspectRatio: "landscape",
   exportPreviewLayout: "fill",
   showCaptions: true,
   captionPosition: DEFAULT_CAPTION_POSITION,
+  videoTransform: DEFAULT_VIDEO_TRANSFORM,
+  videoCrop: DEFAULT_VIDEO_CROP,
+  videoCropAspectRatio: null,
+  videoSelected: false,
   layers: [createCaptionLayer(DEFAULT_CAPTION_POSITION)],
   selectedLayerId: null,
   aiClipSuggestions: [],
+  aiClipDurationRange: DEFAULT_AI_CLIP_DURATION_RANGE,
   aiClipPreviewRange: null,
   projectPhase: "idle",
   workspaceScreen: "projects",
@@ -511,13 +544,18 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       waveform: null,
       hasAudio: false,
       duration: 0,
-      exportPreviewAspectRatio: null,
+      exportPreviewAspectRatio: "landscape",
       exportPreviewLayout: "fill",
       showCaptions: true,
       captionPosition: DEFAULT_CAPTION_POSITION,
+      videoTransform: DEFAULT_VIDEO_TRANSFORM,
+      videoCrop: DEFAULT_VIDEO_CROP,
+      videoCropAspectRatio: null,
+      videoSelected: false,
       layers: [createCaptionLayer(DEFAULT_CAPTION_POSITION)],
       selectedLayerId: null,
       aiClipSuggestions: [],
+      aiClipDurationRange: DEFAULT_AI_CLIP_DURATION_RANGE,
       aiClipPreviewRange: null,
       workspaceScreen: "projects",
       })
@@ -583,13 +621,23 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       playing: false,
       exportUrl: null,
       exportOpen: false,
-      exportPreviewAspectRatio: null,
+      exportPreviewAspectRatio: "landscape",
       exportPreviewLayout: "fill",
       showCaptions: true,
       captionPosition,
+      videoTransform: record.videoTransform
+        ? clampVideoTransform(record.videoTransform, DEFAULT_VIDEO_TRANSFORM)
+        : DEFAULT_VIDEO_TRANSFORM,
+      videoCrop: record.videoCrop
+        ? clampVideoCrop(record.videoCrop, DEFAULT_VIDEO_CROP)
+        : DEFAULT_VIDEO_CROP,
+      videoCropAspectRatio: record.videoCropAspectRatio ?? null,
+      videoSelected: false,
       layers,
       selectedLayerId: null,
       aiClipSuggestions: record.aiClipSuggestions ?? [],
+      aiClipDurationRange:
+        record.aiClipDurationRange ?? DEFAULT_AI_CLIP_DURATION_RANGE,
       aiClipPreviewRange: null,
       waveform: null,
       hasAudio: false,
@@ -655,6 +703,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       selectedCutIndex: null,
       selectedWordIds: [],
       aiClipSuggestions: [],
+      aiClipDurationRange: DEFAULT_AI_CLIP_DURATION_RANGE,
       aiClipPreviewRange: null,
       })
     );
@@ -690,6 +739,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       skipTranscription: true,
       source: "import",
       aiClipSuggestions: [],
+      aiClipDurationRange: DEFAULT_AI_CLIP_DURATION_RANGE,
       aiClipPreviewRange: null,
       })
     );
@@ -794,6 +844,16 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const usable = ranges.filter((r) => r.end - r.start > 1e-4);
     if (usable.length === 0) return;
     const s = get();
+    const cutsBefore = getCutRanges(s.words, s.duration, s.manualCuts);
+    const selectedClipBefore =
+      s.selectedClipIndex == null
+        ? null
+        : getSelectedClipSegment(
+            cutsBefore,
+            s.duration,
+            s.sceneBoundaries,
+            s.selectedClipIndex
+          );
     let words = s.words;
     let manualCuts = s.manualCuts;
     let nextManualCutId = s.nextManualCutId;
@@ -803,17 +863,50 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       nextManualCutId = added.nextId;
       words = deleteWordsCoveredBy(words, r.start, r.end);
     }
+    const cutsAfter = getCutRanges(words, s.duration, manualCuts);
+    const clipsAfter = getClipSegments(
+      getKeepRanges(cutsAfter, s.duration),
+      s.sceneBoundaries
+    );
+    const selectedClipIndex =
+      selectedClipBefore == null
+        ? null
+        : clipsAfter.find((clip) =>
+            s.currentTime >= clip.start - 1e-3 &&
+            s.currentTime < clip.end - 1e-3
+          )?.index ??
+          clipsAfter.find(
+            (clip) =>
+              selectedClipBefore.start < clip.end - 1e-3 &&
+              selectedClipBefore.end > clip.start + 1e-3
+          )?.index ??
+          clipsAfter.find(
+            (clip) =>
+              clip.start <= selectedClipBefore.start + 1e-3 &&
+              clip.end >= selectedClipBefore.end - 1e-3
+          )?.index ??
+          selectedClipBefore.index;
     pushEdit(get, set, {
       words,
       manualCuts,
       nextManualCutId,
-      selectedClipIndex: null,
+      selectedClipIndex,
       selectedCutIndex: null,
       selectedWordIds: [],
     });
   },
   restoreRanges: (ranges) => {
     const s = get();
+    const cutsBefore = getCutRanges(s.words, s.duration, s.manualCuts);
+    const selectedClipBefore =
+      s.selectedClipIndex == null
+        ? null
+        : getSelectedClipSegment(
+            cutsBefore,
+            s.duration,
+            s.sceneBoundaries,
+            s.selectedClipIndex
+          );
     const result = restoreRangesResult(
       s.words,
       s.manualCuts,
@@ -821,11 +914,34 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       s.nextManualCutId
     );
     if (!result) return;
+    const cutsAfter = getCutRanges(result.words, s.duration, result.manualCuts);
+    const clipsAfter = getClipSegments(
+      getKeepRanges(cutsAfter, s.duration),
+      s.sceneBoundaries
+    );
+    const selectedClipIndex =
+      selectedClipBefore == null
+        ? null
+        : clipsAfter.find((clip) =>
+            s.currentTime >= clip.start - 1e-3 &&
+            s.currentTime < clip.end - 1e-3
+          )?.index ??
+          clipsAfter.find(
+            (clip) =>
+              selectedClipBefore.start < clip.end - 1e-3 &&
+              selectedClipBefore.end > clip.start + 1e-3
+          )?.index ??
+          clipsAfter.find(
+            (clip) =>
+              clip.start <= selectedClipBefore.start + 1e-3 &&
+              clip.end >= selectedClipBefore.end - 1e-3
+          )?.index ??
+          selectedClipBefore.index;
     pushEdit(get, set, {
       words: result.words,
       manualCuts: result.manualCuts,
       nextManualCutId: result.nextCutId,
-      selectedClipIndex: null,
+      selectedClipIndex,
       selectedCutIndex: null,
       selectedWordIds: [],
     });
@@ -1240,6 +1356,35 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     }));
     bumpAutosave();
   },
+  updateVideoTransform: (transform) => {
+    set((s) => ({
+      videoTransform: clampVideoTransform(transform, s.videoTransform),
+    }));
+    bumpAutosave();
+  },
+  updateVideoCrop: (transform, cropAspectRatio) => {
+    set((s) => ({
+      videoCrop: clampVideoCrop(transform, s.videoCrop),
+      ...(cropAspectRatio ? { videoCropAspectRatio: cropAspectRatio } : {}),
+    }));
+    bumpAutosave();
+  },
+  updateImageCrop: (id, transform, cropAspectRatio) => {
+    set((s) => {
+      const image = s.layers.find((layer) => layer.id === id && layer.type === "image");
+      if (!image || image.type !== "image") return {};
+      const crop = clampVideoCrop(transform, image.crop ?? DEFAULT_VIDEO_CROP);
+      return {
+        layers: s.layers.map((layer) =>
+          layer.id === id && layer.type === "image"
+            ? { ...layer, crop, ...(cropAspectRatio ? { cropAspectRatio } : {}) }
+            : layer
+        ),
+      };
+    });
+    bumpAutosave();
+  },
+  setVideoSelected: (videoSelected) => set({ videoSelected }),
   addTextLayer: (text = "Text") => {
     const id = crypto.randomUUID();
     set((s) => ({
@@ -1270,23 +1415,46 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     bumpAutosave();
     return id;
   },
-  addImageLayer: (src, name = "Image") => {
+  addImageLayer: (src, name = "Image", aspectRatio) => {
     const id = crypto.randomUUID();
-    set((s) => ({
-      layers: [
-        ...s.layers,
-        {
-          id,
-          name,
-          type: "image",
-          src,
-          transform: { x: 50, y: 50, width: 35, height: 35 },
-          start: Math.min(s.currentTime, s.duration),
-          end: s.duration,
-        },
-      ],
-      selectedLayerId: id,
-    }));
+    set((s) => {
+      const sourceAspectRatio =
+        aspectRatio && Number.isFinite(aspectRatio) && aspectRatio > 0
+          ? aspectRatio
+          : null;
+      const frameAspectRatio =
+        (s.exportPreviewAspectRatio ?? "landscape") === "portrait"
+          ? 9 / 16
+          : 16 / 9;
+      let width = 35;
+      let height = sourceAspectRatio
+        ? (width * frameAspectRatio) / sourceAspectRatio
+        : 35;
+      if (height > 60) {
+        width *= 60 / height;
+        height = 60;
+      }
+
+      return {
+        layers: [
+          ...s.layers,
+          {
+            id,
+            name,
+            type: "image",
+            src,
+            transform: { x: 50, y: 50, width, height },
+            crop: { ...DEFAULT_VIDEO_CROP },
+            ...(sourceAspectRatio
+              ? { cropAspectRatio: sourceAspectRatio }
+              : {}),
+            start: Math.min(s.currentTime, s.duration),
+            end: s.duration,
+          },
+        ],
+        selectedLayerId: id,
+      };
+    });
     bumpAutosave();
     return id;
   },
@@ -1386,6 +1554,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       flushAutosave();
       return next;
     }),
+  setAiClipDurationRange: (aiClipDurationRange) => {
+    set({ aiClipDurationRange });
+    bumpAutosave();
+  },
   setAiClipPreviewRange: (aiClipPreviewRange) =>
     set({ aiClipPreviewRange }),
   previewAiClip: (aiClipPreviewRange) => {
@@ -1433,13 +1605,18 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       playing: false,
       exportUrl: null,
       exportOpen: false,
-      exportPreviewAspectRatio: null,
+      exportPreviewAspectRatio: "landscape",
       exportPreviewLayout: "fill",
       showCaptions: true,
       captionPosition: DEFAULT_CAPTION_POSITION,
+      videoTransform: DEFAULT_VIDEO_TRANSFORM,
+      videoCrop: DEFAULT_VIDEO_CROP,
+      videoCropAspectRatio: null,
+      videoSelected: false,
       layers: [createCaptionLayer(DEFAULT_CAPTION_POSITION)],
       selectedLayerId: null,
       aiClipSuggestions: [],
+      aiClipDurationRange: DEFAULT_AI_CLIP_DURATION_RANGE,
       aiClipPreviewRange: null,
       projectPhase: "idle",
       workspaceScreen: "projects",

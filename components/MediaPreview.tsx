@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import { useEditorStore } from "@/lib/store";
 import {
@@ -10,10 +10,12 @@ import {
 import { useCutRanges } from "@/hooks/useCutRanges";
 import { useSelectedClipSegment } from "@/hooks/useSelectedClipSegment";
 import CaptionOverlay from "./CaptionOverlay";
+import CropDialog from "./CropDialog";
 import LayerControls from "./LayerControls";
 import LayerPropertiesPanel from "./LayerPropertiesPanel";
 import StaticLayerOverlay from "./StaticLayerOverlay";
 import { getTextLayerStyle, layerTiming } from "@/lib/layers";
+import type { ImageLayer } from "@/lib/types";
 
 /**
  * Owns the <video>/<audio> element and the cut-skipping playback loop.
@@ -40,6 +42,14 @@ export default function MediaPreview() {
     (s) => s.setExportPreviewLayout
   );
   const showCaptions = useEditorStore((s) => s.showCaptions);
+  const videoTransform = useEditorStore((s) => s.videoTransform);
+  const videoCrop = useEditorStore((s) => s.videoCrop);
+  const videoCropAspectRatio = useEditorStore((s) => s.videoCropAspectRatio);
+  const videoSelected = useEditorStore((s) => s.videoSelected);
+  const setVideoSelected = useEditorStore((s) => s.setVideoSelected);
+  const updateVideoTransform = useEditorStore((s) => s.updateVideoTransform);
+  const updateVideoCrop = useEditorStore((s) => s.updateVideoCrop);
+  const updateImageCrop = useEditorStore((s) => s.updateImageCrop);
   const setShowCaptions = useEditorStore((s) => s.setShowCaptions);
   const layers = useEditorStore((s) => s.layers);
   const selectedLayerId = useEditorStore((s) => s.selectedLayerId);
@@ -53,15 +63,29 @@ export default function MediaPreview() {
   const words = useEditorStore((s) => s.words);
   const duration = useEditorStore((s) => s.duration);
   const currentTime = useEditorStore((s) => s.currentTime);
+  const [cropOpen, setCropOpen] = useState(false);
+  const [imageCropLayerId, setImageCropLayerId] = useState<string | null>(null);
   const [ratioMenuOpen, setRatioMenuOpen] = useState(false);
   const [layersMenuOpen, setLayersMenuOpen] = useState(false);
+  const [previewFrameSize, setPreviewFrameSize] = useState<{
+    width: number;
+    height: number;
+  } | null>(null);
   const toolbarRef = useRef<HTMLDivElement | null>(null);
   const cuts = useCutRanges();
   const selectedClipSegment = useSelectedClipSegment();
   const activePlaybackRange = selectedClipSegment ?? aiClipPreviewRange;
   const selectedLayer = layers.find((layer) => layer.id === selectedLayerId);
+  const imageCropLayer = layers.find(
+    (layer): layer is ImageLayer =>
+      layer.id === imageCropLayerId && layer.type === "image"
+  );
 
   const mediaRef = useRef<HTMLMediaElement | null>(null);
+  const previewViewportRef = useRef<HTMLDivElement | null>(null);
+  const previewFrameRef = useRef<HTMLDivElement | null>(null);
+  const videoDragStart = useRef<{ x: number; y: number; transform: typeof videoTransform } | null>(null);
+  const suppressVideoClick = useRef(false);
   const isAudio = mediaKind === "audio";
   const cutsRef = useRef(cuts);
   useEffect(() => {
@@ -90,6 +114,34 @@ export default function MediaPreview() {
     document.addEventListener("mousedown", onMouseDown);
     return () => document.removeEventListener("mousedown", onMouseDown);
   }, [layersMenuOpen, ratioMenuOpen]);
+
+  const selectedAspectRatio = exportPreviewAspectRatio ?? "landscape";
+  const canvasAspectRatio =
+    selectedAspectRatio === "portrait" ? 9 / 16 : 16 / 9;
+
+  useEffect(() => {
+    const viewport = previewViewportRef.current;
+    if (!viewport || isAudio) return;
+
+    const fitFrameToViewport = () => {
+      const bounds = viewport.getBoundingClientRect();
+      if (!bounds.width || !bounds.height) return;
+
+      let width = bounds.width;
+      let height = width / canvasAspectRatio;
+      if (height > bounds.height) {
+        height = bounds.height;
+        width = height * canvasAspectRatio;
+      }
+
+      setPreviewFrameSize({ width, height });
+    };
+
+    fitFrameToViewport();
+    const observer = new ResizeObserver(fitFrameToViewport);
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, [canvasAspectRatio, isAudio, mediaUrl]);
 
   const refCb = useCallback(
     (el: HTMLMediaElement | null) => {
@@ -150,12 +202,65 @@ export default function MediaPreview() {
     useEditorStore.getState().togglePlayback();
   }, []);
 
+  const startVideoDrag = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const frame = event.currentTarget.closest("[data-video-frame]");
+      if (!frame) return;
+      setVideoSelected(true);
+      setSelectedLayerId(null);
+      videoDragStart.current = {
+        x: event.clientX,
+        y: event.clientY,
+        transform: videoTransform,
+      };
+      event.currentTarget.setPointerCapture(event.pointerId);
+    },
+    [setSelectedLayerId, setVideoSelected, videoTransform]
+  );
+
+  const moveVideo = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      if (!event.currentTarget.hasPointerCapture(event.pointerId) || !videoDragStart.current) return;
+      const frame = event.currentTarget.closest("[data-video-frame]");
+      if (!frame) return;
+      const bounds = frame.getBoundingClientRect();
+      const dx = event.clientX - videoDragStart.current.x;
+      const dy = event.clientY - videoDragStart.current.y;
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) suppressVideoClick.current = true;
+      updateVideoTransform({
+        x: videoDragStart.current.transform.x + (dx / bounds.width) * 100,
+        y: videoDragStart.current.transform.y + (dy / bounds.height) * 100,
+      });
+    },
+    [updateVideoTransform]
+  );
+
+  const stopVideoDrag = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    videoDragStart.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  }, []);
+
   const addImageFromFile = useCallback(
     (file: File | undefined) => {
       if (!file || !file.type.startsWith("image/")) return;
       const reader = new FileReader();
       reader.onload = () => {
-        if (typeof reader.result === "string") addImageLayer(reader.result, file.name);
+        if (typeof reader.result !== "string") return;
+        const src = reader.result;
+        const image = new window.Image();
+        image.onload = () => {
+          const aspectRatio =
+            image.naturalWidth && image.naturalHeight
+              ? image.naturalWidth / image.naturalHeight
+              : undefined;
+          addImageLayer(src, file.name, aspectRatio);
+        };
+        image.onerror = () => addImageLayer(src, file.name);
+        image.src = src;
       };
       reader.readAsDataURL(file);
     },
@@ -178,29 +283,31 @@ export default function MediaPreview() {
     );
   }
 
-  const selectedAspectRatio = exportPreviewAspectRatio ?? "original";
   const selectedRatioLabel =
-    selectedAspectRatio === "landscape"
-      ? "16:9"
-      : selectedAspectRatio === "portrait"
-        ? "9:16"
-        : "Original";
-  const framedPreview =
-    selectedAspectRatio === "landscape"
-      ? "16 / 9"
-      : selectedAspectRatio === "portrait"
-        ? "9 / 16"
-        : null;
-  const isRatioOriginal = selectedAspectRatio === "original";
-  const objectFit = isRatioOriginal
-    ? "contain"
-    : exportPreviewLayout === "fit"
-      ? "contain"
-      : "cover";
-  const videoClassName =
-    objectFit === "contain"
-      ? "h-full w-full cursor-pointer object-contain"
-      : "h-full w-full cursor-pointer object-cover";
+    selectedAspectRatio === "portrait" ? "9:16" : "16:9";
+  const transformedVideoClass =
+    exportPreviewLayout === "fit"
+      ? "h-full w-full select-none object-contain"
+      : "h-full w-full select-none object-cover";
+  const applyVideoCrop = (
+    crop: typeof videoCrop,
+    visibleCropAspectRatio: number
+  ) => {
+    updateVideoCrop(crop, visibleCropAspectRatio);
+    // `LayerTransform` is stored as canvas percentages. Match its height to
+    // the source crop so the purple box has the same visible proportion.
+    updateVideoTransform({
+      height:
+        (videoTransform.width * getVisibleFrameAspectRatio()) /
+        visibleCropAspectRatio,
+    });
+  };
+  const getVisibleFrameAspectRatio = () => {
+    const bounds = previewFrameRef.current?.getBoundingClientRect();
+    return bounds?.width && bounds.height
+      ? bounds.width / bounds.height
+      : canvasAspectRatio;
+  };
   const layoutButtonClass = (selected: boolean, disabled: boolean) =>
     `flex h-7 items-center rounded-lg px-2 text-xs transition ${
       disabled
@@ -237,6 +344,7 @@ export default function MediaPreview() {
             layerIndex={index}
             onSelect={() => setSelectedLayerId(layer.id)}
             onTransformChange={(transform) => updateLayerTransform(layer.id, transform)}
+            onCrop={layer.type === "image" ? () => setImageCropLayerId(layer.id) : undefined}
           />
         );
       })}
@@ -245,6 +353,9 @@ export default function MediaPreview() {
           name={selectedLayer.name}
           transform={selectedLayer.transform}
           onTransformChange={(transform) => updateLayerTransform(selectedLayer.id, transform)}
+          lockAspectRatio={
+            selectedLayer.type === "image" && Boolean(selectedLayer.cropAspectRatio)
+          }
         />
       )}
       {selectedLayer && (
@@ -252,6 +363,7 @@ export default function MediaPreview() {
           layer={selectedLayer}
           onTransformChange={(transform) => updateLayerTransform(selectedLayer.id, transform)}
           onTextChange={(update) => updateTextLayer(selectedLayer.id, update)}
+          onClose={() => setSelectedLayerId(null)}
           onRemove={() => removeLayer(selectedLayer.id)}
         />
       )}
@@ -280,7 +392,6 @@ export default function MediaPreview() {
               {ratioMenuOpen && (
                 <div className="absolute left-0 top-full z-30 mt-1 min-w-36 overflow-hidden rounded-xl border border-zinc-200 bg-white p-1 shadow-lg shadow-zinc-900/10 dark:border-zinc-700 dark:bg-zinc-900 dark:shadow-black/30">
                   {([
-                    { value: "original", label: "Original" },
                     { value: "landscape", label: "16:9" },
                     { value: "portrait", label: "9:16" },
                   ] as const).map((opt) => {
@@ -289,10 +400,30 @@ export default function MediaPreview() {
                       <button
                         key={opt.value}
                         type="button"
-                      onClick={() => {
-                          setExportPreviewAspectRatio(
-                            opt.value === "original" ? null : opt.value
-                          );
+                        onClick={() => {
+                          setExportPreviewAspectRatio(opt.value);
+                          const nextFrameAspectRatio =
+                            opt.value === "landscape"
+                              ? 16 / 9
+                              : 9 / 16;
+                          if (videoCropAspectRatio) {
+                            updateVideoTransform({
+                              height:
+                                (videoTransform.width * nextFrameAspectRatio) /
+                                videoCropAspectRatio,
+                            });
+                          }
+                          layers.forEach((layer) => {
+                            if (layer.type !== "image" || !layer.cropAspectRatio) return;
+                            updateLayerTransform(layer.id, {
+                              height:
+                                (layer.transform.width * nextFrameAspectRatio) /
+                                layer.cropAspectRatio,
+                            });
+                          });
+                          // Start a new frame in Fit so no source content is
+                          // lost unless the editor explicitly chooses Fill.
+                          setExportPreviewLayout("fit");
                           setRatioMenuOpen(false);
                         }}
                         className={`flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-left text-xs transition ${
@@ -397,23 +528,15 @@ export default function MediaPreview() {
             </span>
             <button
               type="button"
-              disabled={isRatioOriginal}
               onClick={() => setExportPreviewLayout("fit")}
-              className={layoutButtonClass(
-                exportPreviewLayout === "fit",
-                isRatioOriginal
-              )}
+              className={layoutButtonClass(exportPreviewLayout === "fit", false)}
             >
               Fit
             </button>
             <button
               type="button"
-              disabled={isRatioOriginal}
               onClick={() => setExportPreviewLayout("fill")}
-              className={layoutButtonClass(
-                exportPreviewLayout === "fill",
-                isRatioOriginal
-              )}
+              className={layoutButtonClass(exportPreviewLayout === "fill", false)}
             >
               Fill
             </button>
@@ -433,40 +556,119 @@ export default function MediaPreview() {
             </button>
         </div>
       </div>
-      <div className="relative flex min-h-0 flex-1 items-center justify-center bg-zinc-50/70 p-3 sm:p-4 dark:bg-zinc-950/70">
-        {framedPreview ? (
+      <div className="relative min-h-0 flex-1 overflow-hidden bg-black p-3 sm:p-4">
+        <div
+          ref={previewViewportRef}
+          className="flex h-full w-full items-center justify-center overflow-hidden"
+        >
           <div
-            className="relative inline-flex h-full max-h-full max-w-full overflow-hidden rounded-sm bg-black shadow-lg shadow-zinc-900/10 dark:shadow-black/40"
-            style={{ aspectRatio: framedPreview }}
+            data-video-frame
+            data-layer-surface
+            ref={previewFrameRef}
+            className="relative flex-none overflow-hidden rounded-sm bg-black shadow-lg shadow-black/40"
+            style={
+              previewFrameSize
+                ? previewFrameSize
+                : { aspectRatio: canvasAspectRatio, maxHeight: "100%", maxWidth: "100%" }
+            }
           >
-            <video
-              ref={refCb}
-              src={mediaUrl}
-              playsInline
-              onClick={togglePlay}
-              onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
-              onPlay={() => setPlaying(true)}
-              onPause={() => setPlaying(false)}
-              className={videoClassName}
-            />
-            {renderLayers()}
+          <div
+            role="button"
+            tabIndex={0}
+            aria-label="Move and resize video"
+            onPointerDown={startVideoDrag}
+            onPointerMove={moveVideo}
+            onPointerUp={stopVideoDrag}
+            onPointerCancel={stopVideoDrag}
+            onDoubleClick={() => {
+              setVideoSelected(true);
+              setCropOpen(true);
+            }}
+            onClick={() => {
+              if (suppressVideoClick.current) {
+                suppressVideoClick.current = false;
+                return;
+              }
+              if (!videoSelected) return;
+              togglePlay();
+            }}
+            style={{
+              left: `${videoTransform.x}%`,
+              top: `${videoTransform.y}%`,
+              width: `${videoTransform.width}%`,
+              height: `${videoTransform.height}%`,
+            }}
+            className="absolute flex -translate-x-1/2 -translate-y-1/2 cursor-grab touch-none overflow-hidden active:cursor-grabbing"
+          >
+            <div
+              className="absolute"
+              style={{
+                left: `${((-videoCrop.x + videoCrop.width / 2) / videoCrop.width) * 100}%`,
+                top: `${((-videoCrop.y + videoCrop.height / 2) / videoCrop.height) * 100}%`,
+                width: `${(100 / videoCrop.width) * 100}%`,
+                height: `${(100 / videoCrop.height) * 100}%`,
+              }}
+            >
+              <video
+                ref={refCb}
+                src={mediaUrl}
+                playsInline
+                draggable={false}
+                onLoadedMetadata={(e) => {
+                  setDuration(e.currentTarget.duration);
+                }}
+                onPlay={() => setPlaying(true)}
+                onPause={() => setPlaying(false)}
+                className={transformedVideoClass}
+              />
+            </div>
           </div>
-        ) : (
-          <div className="relative inline-flex max-h-full max-w-full">
-            <video
-              ref={refCb}
-              src={mediaUrl}
-              playsInline
-              onClick={togglePlay}
-              onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
-              onPlay={() => setPlaying(true)}
-              onPause={() => setPlaying(false)}
-              className="max-h-full max-w-full cursor-pointer rounded-sm bg-black object-contain shadow-lg shadow-zinc-900/10 dark:shadow-black/40"
+          {renderLayers()}
+          {videoSelected && (
+            <LayerControls
+              name="Video"
+              transform={videoTransform}
+              onTransformChange={updateVideoTransform}
+              lockAspectRatio
             />
-            {renderLayers()}
+          )}
           </div>
-        )}
+        </div>
       </div>
+      {cropOpen && (
+        <CropDialog
+          src={mediaUrl}
+          kind="video"
+          currentTime={currentTime}
+          crop={videoCrop}
+          onClose={() => setCropOpen(false)}
+          onApply={(crop, visibleCropAspectRatio) => {
+            applyVideoCrop(crop, visibleCropAspectRatio);
+            setCropOpen(false);
+          }}
+        />
+      )}
+      {imageCropLayer && (
+        <CropDialog
+          src={imageCropLayer.src}
+          kind="image"
+          crop={imageCropLayer.crop ?? { x: 50, y: 50, width: 100, height: 100 }}
+          onClose={() => setImageCropLayerId(null)}
+          onApply={(crop, visibleCropAspectRatio) => {
+            updateImageCrop(
+              imageCropLayer.id,
+              crop,
+              visibleCropAspectRatio
+            );
+            updateLayerTransform(imageCropLayer.id, {
+              height:
+                (imageCropLayer.transform.width * getVisibleFrameAspectRatio()) /
+                visibleCropAspectRatio,
+            });
+            setImageCropLayerId(null);
+          }}
+        />
+      )}
     </section>
   );
 }

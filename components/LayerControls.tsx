@@ -16,10 +16,13 @@ export default function LayerControls({
   name,
   transform,
   onTransformChange,
+  lockAspectRatio = false,
 }: {
   name: string;
   transform: LayerTransform;
   onTransformChange: (transform: Partial<LayerTransform>) => void;
+  /** Video layers scale uniformly; their framing belongs to the crop editor. */
+  lockAspectRatio?: boolean;
 }) {
   const startResize = (event: ReactPointerEvent<HTMLButtonElement>, corner: Corner) => {
     event.preventDefault();
@@ -33,9 +36,34 @@ export default function LayerControls({
     const onMove = (moveEvent: PointerEvent) => {
       const dx = ((moveEvent.clientX - event.clientX) / bounds.width) * 100;
       const dy = ((moveEvent.clientY - event.clientY) / bounds.height) * 100;
+      if (lockAspectRatio) {
+        const horizontal = corner.includes("e") ? dx : -dx;
+        const vertical = corner.includes("s") ? dy : -dy;
+        const scaleX = 1 + horizontal / initial.width;
+        const scaleY = 1 + vertical / initial.height;
+        const scale = Math.max(
+          0.05,
+          Math.abs(scaleX - 1) >= Math.abs(scaleY - 1) ? scaleX : scaleY
+        );
+        const width = initial.width * scale;
+        const height = initial.height * scale;
+        onTransformChange({
+          x: initial.x + (corner.includes("e") ? 1 : -1) * (width - initial.width) / 2,
+          y: initial.y + (corner.includes("s") ? 1 : -1) * (height - initial.height) / 2,
+          width,
+          height,
+        });
+        return;
+      }
+      const horizontal = corner.includes("e") ? dx : -dx;
+      const vertical = corner.includes("s") ? dy : -dy;
+      // Keep the opposite edge fixed, which makes each corner behave like a
+      // proper canvas transform handle instead of growing from the center.
       onTransformChange({
-        width: initial.width + (corner.includes("e") ? dx : -dx) * 2,
-        height: initial.height + (corner.includes("s") ? dy : -dy) * 2,
+        x: initial.x + dx / 2,
+        y: initial.y + dy / 2,
+        width: initial.width + horizontal,
+        height: initial.height + vertical,
       });
     };
     const onEnd = () => {

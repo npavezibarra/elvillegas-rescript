@@ -1,18 +1,22 @@
 "use client";
 
+/* eslint-disable @next/next/no-img-element -- layers use project-persisted data URLs */
+
 import { useRef } from "react";
-import { getTextLayerStyle } from "@/lib/layers";
+import { DEFAULT_VIDEO_CROP, getTextLayerStyle } from "@/lib/layers";
 import type { EditorLayer, LayerTransform } from "@/lib/types";
 
 export default function StaticLayerOverlay({
   layer,
   layerIndex,
   onSelect,
+  onCrop,
   onTransformChange,
 }: {
   layer: Exclude<EditorLayer, { type: "text"; source: "caption" }>;
   layerIndex: number;
   onSelect: () => void;
+  onCrop?: () => void;
   onTransformChange: (transform: Partial<LayerTransform>) => void;
 }) {
   const start = useRef<{ x: number; y: number; transform: LayerTransform } | null>(null);
@@ -31,6 +35,12 @@ export default function StaticLayerOverlay({
           onSelect();
           start.current = { x: event.clientX, y: event.clientY, transform: layer.transform };
           event.currentTarget.setPointerCapture(event.pointerId);
+        }}
+        onDoubleClick={(event) => {
+          if (layer.type !== "image") return;
+          event.preventDefault();
+          event.stopPropagation();
+          onCrop?.();
         }}
         onPointerMove={(event) => {
           if (!event.currentTarget.hasPointerCapture(event.pointerId) || !start.current) return;
@@ -56,10 +66,22 @@ export default function StaticLayerOverlay({
           width: `${layer.transform.width}%`,
           height: `${layer.transform.height}%`,
         }}
-        className="pointer-events-auto absolute flex -translate-x-1/2 -translate-y-1/2 cursor-grab touch-none items-center active:cursor-grabbing"
+        className={`pointer-events-auto absolute flex -translate-x-1/2 -translate-y-1/2 cursor-grab touch-none items-center active:cursor-grabbing ${
+          layer.type === "image" ? "overflow-hidden" : ""
+        }`}
       >
         {layer.type === "image" ? (
-          <img src={layer.src} alt={layer.name} className="h-full w-full select-none object-contain" draggable={false} />
+          <div
+            className="absolute"
+            style={{
+              left: `${((-(layer.crop ?? DEFAULT_VIDEO_CROP).x + (layer.crop ?? DEFAULT_VIDEO_CROP).width / 2) / (layer.crop ?? DEFAULT_VIDEO_CROP).width) * 100}%`,
+              top: `${((-(layer.crop ?? DEFAULT_VIDEO_CROP).y + (layer.crop ?? DEFAULT_VIDEO_CROP).height / 2) / (layer.crop ?? DEFAULT_VIDEO_CROP).height) * 100}%`,
+              width: `${(100 / (layer.crop ?? DEFAULT_VIDEO_CROP).width) * 100}%`,
+              height: `${(100 / (layer.crop ?? DEFAULT_VIDEO_CROP).height) * 100}%`,
+            }}
+          >
+            <img src={layer.src} alt={layer.name} className="h-full w-full select-none object-cover" draggable={false} />
+          </div>
         ) : (
           <div
             className="w-full whitespace-pre-wrap break-words px-2"

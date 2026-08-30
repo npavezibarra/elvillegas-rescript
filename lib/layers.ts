@@ -14,6 +14,22 @@ export const DEFAULT_CAPTION_TRANSFORM: LayerTransform = {
   height: 16,
 };
 
+/** The source video fills the output frame until the user transforms it. */
+export const DEFAULT_VIDEO_TRANSFORM: LayerTransform = {
+  x: 50,
+  y: 50,
+  width: 100,
+  height: 100,
+};
+
+/** Visible source area inside the video layer. Values stay inside the source. */
+export const DEFAULT_VIDEO_CROP: LayerTransform = {
+  x: 50,
+  y: 50,
+  width: 100,
+  height: 100,
+};
+
 export const DEFAULT_TEXT_LAYER_STYLE: TextLayerStyle = {
   color: "#ffffff",
   fontFamily: "Arial",
@@ -57,6 +73,36 @@ export function withLayerTiming(layer: EditorLayer, duration: number): EditorLay
 }
 
 export function clampLayerTransform(
+  transform: Partial<LayerTransform>,
+  base: LayerTransform
+): LayerTransform {
+  const width = clamp(transform.width ?? base.width, 5, 100);
+  const height = clamp(transform.height ?? base.height, 5, 100);
+  return {
+    x: clamp(transform.x ?? base.x, width / 2, 100 - width / 2),
+    y: clamp(transform.y ?? base.y, height / 2, 100 - height / 2),
+    width,
+    height,
+  };
+}
+
+/**
+ * The source video may extend beyond the canvas, like a regular editor canvas
+ * object. This lets an editor crop it by moving or scaling it past the frame.
+ */
+export function clampVideoTransform(
+  transform: Partial<LayerTransform>,
+  base: LayerTransform
+): LayerTransform {
+  return {
+    x: clamp(transform.x ?? base.x, -100, 200),
+    y: clamp(transform.y ?? base.y, -100, 200),
+    width: clamp(transform.width ?? base.width, 5, 200),
+    height: clamp(transform.height ?? base.height, 5, 200),
+  };
+}
+
+export function clampVideoCrop(
   transform: Partial<LayerTransform>,
   base: LayerTransform
 ): LayerTransform {

@@ -2,7 +2,7 @@
 
 import type { FFmpeg } from "@ffmpeg/ffmpeg";
 import { en } from "@/lib/i18n/messages/en";
-import type { EditorLayer, TimeRange, Word } from "./types";
+import type { EditorLayer, LayerTransform, TimeRange, Word } from "./types";
 import { serializeCaptionAss, serializeStaticTextAss } from "./captionsExport";
 import { originalToEdited } from "./edits";
 import { layerTiming } from "./layers";
@@ -178,6 +178,10 @@ export interface VideoExportOptions {
   resolution?: VideoExportResolution;
   aspectRatio?: VideoExportAspectRatio;
   layout?: VideoExportLayout;
+  /** Placement of the source video within the exported frame. */
+  videoTransform?: LayerTransform;
+  /** Source region visible inside the video layer. */
+  videoCrop?: LayerTransform;
   sourceWidth?: number;
   sourceHeight?: number;
 }
@@ -303,6 +307,8 @@ export async function exportVideo(
     layout = "fill",
     sourceWidth = 1920,
     sourceHeight = 1080,
+    videoTransform,
+    videoCrop,
   }: VideoExportOptions = {}
 ): Promise<Blob> {
   if (keepRanges.length === 0) {
@@ -345,6 +351,22 @@ export async function exportVideo(
   let videoMap = transform ? "[vout]" : "[outv]";
   if (transform) {
     filter += `;[outv]${transform}[vout]`;
+  }
+  if (videoCrop && (videoCrop.width < 100 || videoCrop.height < 100 || videoCrop.x !== 50 || videoCrop.y !== 50)) {
+    const width = even((videoCrop.width / 100) * captionDims.width);
+    const height = even((videoCrop.height / 100) * captionDims.height);
+    const x = Math.round((videoCrop.x / 100) * captionDims.width - width / 2);
+    const y = Math.round((videoCrop.y / 100) * captionDims.height - height / 2);
+    filter += `;${videoMap}crop=${width}:${height}:${x}:${y}[videoCrop]`;
+    videoMap = "[videoCrop]";
+  }
+  if (videoTransform && (videoTransform.width < 100 || videoTransform.height < 100 || videoTransform.x !== 50 || videoTransform.y !== 50)) {
+    const width = even((videoTransform.width / 100) * captionDims.width);
+    const height = even((videoTransform.height / 100) * captionDims.height);
+    const x = Math.round((videoTransform.x / 100) * captionDims.width - width / 2);
+    const y = Math.round((videoTransform.y / 100) * captionDims.height - height / 2);
+    filter += `;${videoMap}scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}[videoLayer];color=c=black:s=${captionDims.width}x${captionDims.height}:d=${editedDuration.toFixed(3)}[videoCanvas];[videoCanvas][videoLayer]overlay=${x}:${y}[vvideo]`;
+    videoMap = "[vvideo]";
   }
 
   const layerFiles: string[] = [];
@@ -415,8 +437,12 @@ export async function exportVideo(
     const height = even((layer.transform.height / 100) * captionDims.height);
     const x = Math.round((layer.transform.x / 100) * captionDims.width - width / 2);
     const y = Math.round((layer.transform.y / 100) * captionDims.height - height / 2);
+    const crop = layer.crop;
+    const cropFilter = crop
+      ? `crop=iw*${(crop.width / 100).toFixed(6)}:ih*${(crop.height / 100).toFixed(6)}:iw*${((crop.x - crop.width / 2) / 100).toFixed(6)}:ih*${((crop.y - crop.height / 2) / 100).toFixed(6)},`
+      : "";
     const imageLabel = `img${layerSequence}`;
-    filter += `;[${imageInputIndex}:v]format=rgba,scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black@0[${imageLabel}];${videoMap}[${imageLabel}]overlay=${x}:${y}:eof_action=repeat:enable='between(t,${layerStart.toFixed(3)},${layerEnd.toFixed(3)})'[vl${layerSequence}]`;
+    filter += `;[${imageInputIndex}:v]format=rgba,${cropFilter}scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}[${imageLabel}];${videoMap}[${imageLabel}]overlay=${x}:${y}:eof_action=repeat:enable='between(t,${layerStart.toFixed(3)},${layerEnd.toFixed(3)})'[vl${layerSequence}]`;
     videoMap = `[vl${layerSequence++}]`;
     imageInputIndex++;
     wroteLayers = true;

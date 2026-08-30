@@ -14,7 +14,7 @@ import {
 } from "./languages";
 import type { MediaKind } from "./media";
 import type { ClipSuggestion } from "./aiClips";
-import type { EditorLayer, ManualCut, SceneBoundary, SpeakerInfo, Word } from "./types";
+import type { EditorLayer, LayerTransform, ManualCut, SceneBoundary, SpeakerInfo, Word } from "./types";
 
 const DB_NAME = "rescript-projects";
 const DB_VERSION = 1;
@@ -48,8 +48,16 @@ export interface ProjectRecord extends ProjectMeta {
   captionPosition?: { x: number; y: number };
   /** Visual layers; optional so projects saved before layers remain compatible. */
   layers?: EditorLayer[];
+  /** Placement of the source video within the output frame. */
+  videoTransform?: LayerTransform;
+  /** Region of the source video visible inside the video layer. */
+  videoCrop?: LayerTransform;
+  /** Physical width/height ratio selected in the video crop dialog. */
+  videoCropAspectRatio?: number;
   /** AI-generated clip suggestions for the project (optional for older saves). */
   aiClipSuggestions?: ClipSuggestion[];
+  /** Preferred min/max duration filter for imported AI clips (optional for older saves). */
+  aiClipDurationRange?: { min: string; max: string };
   /** Blade/trim cuts not owned by deleted words (optional for older saves). */
   manualCuts?: ManualCut[];
   /** Scene split points in original media time (optional for older saves). */
@@ -195,7 +203,11 @@ export async function putProject(input: ProjectWrite): Promise<string> {
     showDeleted: input.showDeleted,
     captionPosition: input.captionPosition,
     layers: input.layers ?? [],
+    videoTransform: input.videoTransform,
+    videoCrop: input.videoCrop,
+    videoCropAspectRatio: input.videoCropAspectRatio,
     aiClipSuggestions: input.aiClipSuggestions ?? [],
+    aiClipDurationRange: input.aiClipDurationRange,
     manualCuts: input.manualCuts ?? [],
     sceneBoundaries: input.sceneBoundaries ?? [],
     speakers: input.speakers ?? [],

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Trash2 } from "lucide-react";
+import { Trash2, X } from "lucide-react";
 import { getTextLayerStyle } from "@/lib/layers";
 import type { EditorLayer, LayerTransform, TextLayerStyle } from "@/lib/types";
 
@@ -16,11 +16,13 @@ export default function LayerPropertiesPanel({
   layer,
   onTransformChange,
   onTextChange,
+  onClose,
   onRemove,
 }: {
   layer: EditorLayer;
   onTransformChange: (transform: Partial<LayerTransform>) => void;
   onTextChange: (update: { text?: string; style?: Partial<TextLayerStyle> }) => void;
+  onClose: () => void;
   onRemove: () => void;
 }) {
   const textStyle = layer.type === "text" ? getTextLayerStyle(layer) : null;
@@ -30,16 +32,26 @@ export default function LayerPropertiesPanel({
     <aside className="absolute right-3 top-3 z-40 w-56 rounded-xl border border-zinc-200 bg-white/95 p-3 shadow-xl shadow-zinc-900/10 backdrop-blur-md dark:border-zinc-700 dark:bg-zinc-900/95 dark:shadow-black/30">
       <div className="mb-2 flex items-center justify-between gap-2">
         <span className="truncate text-xs font-semibold text-zinc-800 dark:text-zinc-100">{layer.name}</span>
-        {layer.id !== "captions" && (
+        <div className="flex items-center gap-1">
+          {layer.id !== "captions" && (
+            <button
+              type="button"
+              onClick={onRemove}
+              title="Remove layer"
+              className="rounded p-1 text-zinc-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40 dark:hover:text-red-300"
+            >
+              <Trash2 size={13} />
+            </button>
+          )}
           <button
             type="button"
-            onClick={onRemove}
-            title="Remove layer"
-            className="rounded p-1 text-zinc-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40 dark:hover:text-red-300"
+            onClick={onClose}
+            title="Close panel"
+            className="rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
           >
-            <Trash2 size={13} />
+            <X size={13} />
           </button>
-        )}
+        </div>
       </div>
 
       {layer.type === "text" && (

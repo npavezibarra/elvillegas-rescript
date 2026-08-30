@@ -122,6 +122,10 @@ export interface TextLayer extends LayerBase {
 export interface ImageLayer extends LayerBase {
   type: "image";
   src: string;
+  /** Visible source area; absent on older projects means the whole image. */
+  crop?: LayerTransform;
+  /** Physical width/height ratio of the cropped source area. */
+  cropAspectRatio?: number;
 }
 
 export type EditorLayer = TextLayer | ImageLayer;

@@ -31,8 +31,10 @@ export default function AiClipsPanel({
   const speakers = useEditorStore((s) => s.speakers);
   const duration = useEditorStore((s) => s.duration);
   const suggestions = useEditorStore((s) => s.aiClipSuggestions);
+  const durationRange = useEditorStore((s) => s.aiClipDurationRange);
   const previewRange = useEditorStore((s) => s.aiClipPreviewRange);
   const setSuggestions = useEditorStore((s) => s.setAiClipSuggestions);
+  const setDurationRange = useEditorStore((s) => s.setAiClipDurationRange);
   const setPreviewRange = useEditorStore((s) => s.setAiClipPreviewRange);
   const createClipFromRange = useEditorStore((s) => s.createClipFromRange);
   const previewAiClip = useEditorStore((s) => s.previewAiClip);
@@ -80,7 +82,27 @@ export default function AiClipsPanel({
     setCreateError(null);
     try {
       const parsed = parseClipSuggestions(pasteValue, duration);
-      setSuggestions(parsed);
+      const min = durationRange.min.trim() === "" ? null : Number(durationRange.min);
+      const max = durationRange.max.trim() === "" ? null : Number(durationRange.max);
+      if (min !== null && (!Number.isFinite(min) || min < 0)) {
+        throw new Error("Minimum clip length must be 0 or greater.");
+      }
+      if (max !== null && (!Number.isFinite(max) || max < 0)) {
+        throw new Error("Maximum clip length must be 0 or greater.");
+      }
+      if (min !== null && max !== null && max < min) {
+        throw new Error("Maximum clip length must be greater than minimum.");
+      }
+      const filtered = parsed.filter((clip) => {
+        const clipDuration = clip.end - clip.start;
+        if (min !== null && clipDuration < min - 1e-3) return false;
+        if (max !== null && clipDuration > max + 1e-3) return false;
+        return true;
+      });
+      if (filtered.length === 0) {
+        throw new Error("No clips match the selected duration range.");
+      }
+      setSuggestions(filtered);
       setPreviewRange(null);
       setDragIndex(null);
       setDropIndex(null);
@@ -89,7 +111,14 @@ export default function AiClipsPanel({
         err instanceof Error ? err.message : "Could not import clips."
       );
     }
-  }, [pasteValue, duration, setSuggestions, setPreviewRange]);
+  }, [
+    pasteValue,
+    duration,
+    durationRange.min,
+    durationRange.max,
+    setSuggestions,
+    setPreviewRange,
+  ]);
 
   const clearPreview = useCallback(() => {
     setPreviewRange(null);
@@ -162,6 +191,56 @@ export default function AiClipsPanel({
           </div>
 
           <div className="space-y-3 px-3 py-3">
+            <div className="space-y-2 rounded-xl border border-zinc-200 bg-zinc-50/80 p-3 dark:border-zinc-800 dark:bg-zinc-950/40">
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-[11px] font-medium tracking-wide text-zinc-400 dark:text-zinc-500">
+                  Clip duration range
+                </p>
+                <p className="text-[11px] text-zinc-400 dark:text-zinc-500">
+                  {durationRange.min.trim() === "" ? "0" : durationRange.min}s
+                  {" "}
+                  to
+                  {" "}
+                  {durationRange.max.trim() === "" ? "any" : `${durationRange.max}s`}
+                </p>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <label className="block">
+                  <span className="mb-1 block text-[10px] font-medium uppercase tracking-wide text-zinc-400 dark:text-zinc-500">
+                    Min seconds
+                  </span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.1"
+                    value={durationRange.min}
+                    onChange={(e) =>
+                      setDurationRange({ ...durationRange, min: e.target.value })
+                    }
+                    className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[13px] text-zinc-800 outline-none transition placeholder:text-zinc-400 focus:border-zinc-400 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:focus:border-zinc-500"
+                  />
+                </label>
+                <label className="block">
+                  <span className="mb-1 block text-[10px] font-medium uppercase tracking-wide text-zinc-400 dark:text-zinc-500">
+                    Max seconds
+                  </span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.1"
+                    value={durationRange.max}
+                    onChange={(e) =>
+                      setDurationRange({ ...durationRange, max: e.target.value })
+                    }
+                    placeholder="Any"
+                    className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[13px] text-zinc-800 outline-none transition placeholder:text-zinc-400 focus:border-zinc-400 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:focus:border-zinc-500"
+                  />
+                </label>
+              </div>
+              <p className="text-[11px] leading-relaxed text-zinc-400 dark:text-zinc-500">
+                Only clips whose duration falls inside this range will be imported.
+              </p>
+            </div>
             <label className="block">
               <span className="mb-1.5 block text-[11px] font-medium tracking-wide text-zinc-400 dark:text-zinc-500">
                 Paste ChatGPT clip results:

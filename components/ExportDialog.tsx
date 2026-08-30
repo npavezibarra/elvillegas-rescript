@@ -56,7 +56,6 @@ const VIDEO_RESOLUTIONS: { value: VideoExportResolution; label: string }[] = [
 ];
 
 const VIDEO_ASPECT_RATIOS: { value: VideoExportAspectRatio; label: string }[] = [
-  { value: "original", label: "Original" },
   { value: "landscape", label: "16:9" },
   { value: "portrait", label: "9:16" },
 ];
@@ -99,6 +98,8 @@ export default function ExportDialog() {
   );
   const showCaptions = useEditorStore((s) => s.showCaptions);
   const layers = useEditorStore((s) => s.layers);
+  const videoTransform = useEditorStore((s) => s.videoTransform);
+  const videoCrop = useEditorStore((s) => s.videoCrop);
   const videoFile = useEditorStore((s) => s.videoFile);
   const mediaKind = useEditorStore((s) => s.mediaKind);
   const duration = useEditorStore((s) => s.duration);
@@ -173,7 +174,7 @@ export default function ExportDialog() {
   const dialogBusy = exporting || timelineBusy;
   const hasWords = words.length > 0;
   const aspectRatio: VideoExportAspectRatio =
-    exportPreviewAspectRatio ?? "original";
+    exportPreviewAspectRatio ?? "landscape";
 
   // Fall back when the remembered tab isn't valid for this project.
   const activeTab: ExportTab =
@@ -262,7 +263,7 @@ export default function ExportDialog() {
   const setAspectRatioOption = useCallback(
     (value: VideoExportAspectRatio) => {
       clearMediaExport();
-      setExportPreviewAspectRatio(value === "original" ? null : value);
+      setExportPreviewAspectRatio(value);
     },
     [clearMediaExport, setExportPreviewAspectRatio]
   );
@@ -304,6 +305,8 @@ export default function ExportDialog() {
               resolution,
               aspectRatio,
               layout: exportPreviewLayout,
+              videoTransform,
+              videoCrop,
               sourceWidth:
                 videoEl && "videoWidth" in videoEl
                   ? (videoEl as HTMLVideoElement).videoWidth || 1920
@@ -346,6 +349,8 @@ export default function ExportDialog() {
     exportPreviewLayout,
     showCaptions,
     layers,
+    videoTransform,
+    videoCrop,
     videoEl,
     setStatus,
     setExportUrl,
@@ -551,7 +556,7 @@ export default function ExportDialog() {
               label="Layout"
               value={exportPreviewLayout}
               options={VIDEO_LAYOUTS}
-              disabled={exporting || aspectRatio === "original"}
+              disabled={exporting}
               onChange={setLayoutOption}
             />
             <OptionGroup
