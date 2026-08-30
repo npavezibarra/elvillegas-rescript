@@ -67,6 +67,13 @@ export function layerTiming(layer: EditorLayer, duration: number) {
   return { start, end };
 }
 
+/** Captions follow the transcript globally, even if an older project stored a stale range. */
+export function renderLayerTiming(layer: EditorLayer, duration: number) {
+  return layer.type === "text" && layer.source === "caption"
+    ? { start: 0, end: duration }
+    : layerTiming(layer, duration);
+}
+
 export function withLayerTiming(layer: EditorLayer, duration: number): EditorLayer {
   const { start, end } = layerTiming(layer, duration);
   return { ...layer, start, end };

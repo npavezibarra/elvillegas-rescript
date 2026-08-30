@@ -31,6 +31,16 @@ function assert(cond: boolean, msg: string) {
   const ass = serializeStaticTextAss(layer, 12.5, 1920, 1080);
   assert(ass.includes("{\\an5\\pos(960,216)}A title"), "static text position");
   assert(ass.includes("0:00:12.50"), "static text duration");
+  const bundledFontAss = serializeStaticTextAss(
+    layer,
+    12.5,
+    1920,
+    1080,
+    0,
+    12.5,
+    "Geist"
+  );
+  assert(bundledFontAss.includes("Style: Text,Geist,"), "bundled static text font");
   console.log("static text export: ok");
 }
 
@@ -65,11 +75,14 @@ const words: Word[] = [
   assert(ass.includes("[Script Info]"), "ass header");
   assert(ass.includes("PlayResX: 1080"), "ass width");
   assert(ass.includes("PlayResY: 1920"), "ass height");
-  assert(ass.includes("{\\k35}Sigo"), "karaoke word 1");
-  assert(ass.includes("{\\k17}con"), "karaoke word 2");
-  assert(ass.includes("{\\k38}Rettig"), "karaoke word 3");
-  assert(ass.includes("Dialogue: 0,0:00:00.00,0:00:00.90,Caption"), "first cue timing");
-  assert(ass.includes("Dialogue: 0,0:00:01.65,0:00:02.15,Caption"), "second cue timing");
+  assert(ass.includes("Style: Active,Arial,"), "active caption style");
+  assert(ass.includes("&H004DD3FC"), "active caption amber background");
+  assert(ass.includes("{\\rActive}Sigo{\\rCaption}"), "active word 1");
+  assert(ass.includes("{\\rActive}con{\\rCaption}"), "active word 2");
+  assert(ass.includes("{\\rActive}Rettig{\\rCaption}"), "active word 3");
+  assert(ass.includes("Dialogue: 0,0:00:00.00,0:00:00.35,Caption"), "first word cue timing");
+  assert(ass.includes("Dialogue: 0,0:00:00.35,0:00:00.52,Caption"), "second word cue timing");
+  assert(ass.includes("Dialogue: 0,0:00:01.65,0:00:01.75,Caption"), "second block cue timing");
   console.log("ass burn-in export: ok");
 }
 
@@ -89,9 +102,11 @@ const words: Word[] = [
     playResX: 1000,
     playResY: 1000,
     layer,
+    fontName: "Geist",
   });
   assert(ass.includes("{\\an4\\pos(250,400)}"), "caption layer position and alignment");
   assert(ass.includes("&H00FFC636"), "caption layer color");
+  assert(ass.includes("Style: Caption,Geist,"), "bundled caption font override");
   console.log("caption layer styling: ok");
 }
 

@@ -1,4 +1,5 @@
-import type { Word } from "./types";
+import { isWordCutOut } from "./edits";
+import type { TimeRange, Word } from "./types";
 
 /**
  * Heuristic settings for grouping transcript words into captions.
@@ -37,6 +38,19 @@ const DEFAULT_LAYOUT: Required<CaptionLayoutOptions> = {
   maxChars: 40,
   gapS: 0.6,
 };
+
+/** Match the caption source to the kept words shown by the active transcript clip. */
+export function getPreviewCaptionWords(
+  words: Word[],
+  cuts: TimeRange[],
+  activeRange?: TimeRange | null
+): Word[] {
+  return words.filter((word) => {
+    if (isWordCutOut(word, cuts)) return false;
+    if (!activeRange) return true;
+    return word.end > activeRange.start && word.start < activeRange.end;
+  });
+}
 
 /**
  * Build caption blocks from a word list.
@@ -154,4 +168,3 @@ function findWordIndex(
   if (idx >= 0 && timeS < words[idx]!.end + endGraceS) return idx;
   return -1;
 }
-

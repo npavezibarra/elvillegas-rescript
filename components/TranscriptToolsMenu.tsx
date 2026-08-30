@@ -1,7 +1,7 @@
 "use client";
 
 import { useId, useMemo, useState } from "react";
-import { Undo2, VolumeX, WandSparkles, Zap, type LucideIcon } from "lucide-react";
+import { Sparkles, Undo2, VolumeX, WandSparkles, Zap, type LucideIcon } from "lucide-react";
 import { useEditorStore } from "@/lib/store";
 import { findDeletedFillerWordIds, findFillerWordIds } from "@/lib/fillers";
 import {
@@ -80,7 +80,11 @@ const TOOLS: ToolDef[] = [
  * to do drop out, so the badge doubles as "how many cleanups are available
  * right now" — and the menu hides itself when that leaves none.
  */
-export default function TranscriptToolsMenu() {
+export default function TranscriptToolsMenu({
+  onOpenCorrection,
+}: {
+  onOpenCorrection: () => void;
+}) {
   const { t } = useI18n();
   const words = useEditorStore((s) => s.words);
   const duration = useEditorStore((s) => s.duration);
@@ -123,7 +127,7 @@ export default function TranscriptToolsMenu() {
     [ctx]
   );
 
-  if (available.length === 0) return null;
+  if (words.length === 0) return null;
 
   return (
     <Popover open={open} onOpenChange={setOpen} placement="bottom-end" backdrop>
@@ -141,7 +145,7 @@ export default function TranscriptToolsMenu() {
             <Zap size={14} />
             <span className="hidden sm:inline">{t("common.tools")}</span>
             <span className="rounded-full bg-zinc-100 px-1.5 py-0.5 text-[9px] font-medium tabular-nums text-zinc-600 dark:bg-zinc-700 dark:text-zinc-300">
-              {available.length}
+              {available.length + 1}
             </span>
           </button>
         </PopoverTrigger>
@@ -152,6 +156,23 @@ export default function TranscriptToolsMenu() {
           aria-label={t("common.tools")}
           className="z-40 w-[15rem] overflow-hidden p-1.5"
         >
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              onOpenCorrection();
+              setOpen(false);
+            }}
+            className="flex w-full cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13px] text-zinc-700 transition hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800/80"
+          >
+            <span className="shrink-0 text-amber-500">
+              <Sparkles size={14} />
+            </span>
+            <span className="flex-1">Corregir transcripción con IA</span>
+          </button>
+          {available.length > 0 && (
+            <div className="mx-2 my-1 h-px bg-zinc-100 dark:bg-zinc-800" />
+          )}
           {available.map(({ tool, count }) => (
             <button
               key={tool.key}

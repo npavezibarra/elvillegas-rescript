@@ -4,16 +4,23 @@ import type { FFmpeg } from "@ffmpeg/ffmpeg";
 import { en } from "@/lib/i18n/messages/en";
 import type { EditorLayer, LayerTransform, TimeRange, Word } from "./types";
 import { serializeCaptionAss, serializeStaticTextAss } from "./captionsExport";
+import { writeCaptionRasterTrack } from "./captionRaster";
 import { originalToEdited } from "./edits";
-import { layerTiming } from "./layers";
+import { renderLayerTiming } from "./layers";
 
 const CORE_BASE = "/vendor/ffmpeg";
 const INPUT_DIR = "/input";
 const INPUT_NAME = "input_video";
 const INPUT_PATH = `${INPUT_DIR}/${INPUT_NAME}`;
+const EXPORT_STALL_TIMEOUT_MS = 90_000;
+const EXPORT_FONT_URL = "/vendor/fonts/Geist-Regular.ttf";
+const EXPORT_FONT_DIR = "/fonts";
+const EXPORT_FONT_PATH = `${EXPORT_FONT_DIR}/Geist-Regular.ttf`;
+const EXPORT_FONT_FAMILY = "Geist";
 
 let ffmpegPromise: Promise<FFmpeg> | null = null;
 let mountedFor: File | null = null;
+let exportFontBytesPromise: Promise<Uint8Array> | null = null;
 
 /** Lazily load a singleton multi-threaded ffmpeg.wasm instance. */
 export async function getFFmpeg(): Promise<FFmpeg> {
@@ -23,20 +30,10 @@ export async function getFFmpeg(): Promise<FFmpeg> {
         import("@ffmpeg/ffmpeg"),
         import("@ffmpeg/util"),
       ]);
-      // Multi-threaded ffmpeg.wasm needs SharedArrayBuffer, i.e. a
-      // cross-origin-isolated page (COOP/COEP from vercel.json on the web, from
-      // the app:// handler in Electron). Without it the core throws a bare
-      // "SharedArrayBuffer is not defined" from deep inside the worker.
-      if (!self.crossOriginIsolated || typeof SharedArrayBuffer === "undefined") {
-        throw new Error(
-          "The media engine isn't ready yet — reload the page and try again."
-        );
-      }
       const ffmpeg = new FFmpeg();
       await ffmpeg.load({
         coreURL: await toBlobURL(`${CORE_BASE}/ffmpeg-core.js`, "text/javascript"),
         wasmURL: await toBlobURL(`${CORE_BASE}/ffmpeg-core.wasm`, "application/wasm"),
-        workerURL: await toBlobURL(`${CORE_BASE}/ffmpeg-core.worker.js`, "text/javascript"),
         // Served same-origin (copied on postinstall): the bundled class worker
         // contains a dynamic import() that Next's bundler cannot handle.
         classWorkerURL: new URL("/vendor/ffmpeg-class/worker.js", location.href).href,
@@ -53,13 +50,10 @@ export async function getFFmpeg(): Promise<FFmpeg> {
 /**
  * Terminate the ffmpeg worker and hand its heap back to the browser.
  *
- * ffmpeg-core is built with INITIAL_MEMORY === MAXIMUM_MEMORY === 1 GiB on a
- * shared WebAssembly.Memory, so the full gigabyte is committed the moment the
- * core instantiates and never shrinks — deleting MEMFS files frees nothing.
- * Held across transcription it sits alongside onnxruntime's heap, the model
- * weights and the decoded PCM, and WebKit kills the tab for it ("This webpage
- * was reloaded because it was using significant memory"). Nothing needs ffmpeg
- * between audio extraction and export, so drop it there and pay one re-init.
+ * The media engine still retains its WebAssembly heap and temporary filesystem
+ * until its worker is terminated. Nothing needs ffmpeg between audio extraction
+ * and export, so drop it there and pay one re-init instead of holding that
+ * memory alongside the speech model and decoded PCM.
  */
 export async function releaseFFmpeg(): Promise<void> {
   const pending = ffmpegPromise;
@@ -77,6 +71,12 @@ export async function releaseFFmpeg(): Promise<void> {
   } catch {
     // Load failed or the worker is already gone — the heap went with it.
   }
+}
+
+function terminateFFmpegInstance(ffmpeg: FFmpeg): void {
+  ffmpegPromise = null;
+  mountedFor = null;
+  ffmpeg.terminate();
 }
 
 async function ensureInput(ffmpeg: FFmpeg, file: File): Promise<string> {
@@ -104,6 +104,20 @@ async function ensureInput(ffmpeg: FFmpeg, file: File): Promise<string> {
   );
   mountedFor = file;
   return INPUT_PATH;
+}
+
+async function ensureExportFont(ffmpeg: FFmpeg): Promise<void> {
+  exportFontBytesPromise ??= fetch(EXPORT_FONT_URL).then(async (response) => {
+    if (!response.ok) throw new Error("Could not load the export font.");
+    return new Uint8Array(await response.arrayBuffer());
+  });
+  try {
+    await ffmpeg.createDir(EXPORT_FONT_DIR);
+  } catch {
+    // The directory may already exist on a reused media engine.
+  }
+  // writeFile transfers its buffer to the worker, so preserve the cached copy.
+  await ffmpeg.writeFile(EXPORT_FONT_PATH, new Uint8Array(await exportFontBytesPromise));
 }
 
 /**
@@ -371,68 +385,103 @@ export async function exportVideo(
 
   const layerFiles: string[] = [];
   const layerInputArgs: string[] = [];
-  let wroteLayers = false;
   let layerSequence = 0;
   let imageInputIndex = 1;
   const layersToRender = layers.length > 0 ? layers : [];
+  let stalled = false;
+  let stallTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const clearStallTimer = () => {
+    if (stallTimer !== null) clearTimeout(stallTimer);
+    stallTimer = null;
+  };
+  const armStallTimer = () => {
+    clearStallTimer();
+    stallTimer = setTimeout(() => {
+      stalled = true;
+      terminateFFmpegInstance(ffmpeg);
+    }, EXPORT_STALL_TIMEOUT_MS);
+  };
 
   // Older callers can still request captions without the layer model.
   if (layersToRender.length === 0 && burnCaptions && captions?.words.length) {
+    await ensureExportFont(ffmpeg);
     const path = "/captions.ass";
     const ass = serializeCaptionAss(captions.words, {
       cuts: captions.cuts,
       duration: captions.duration,
       playResX: captionDims.width,
       playResY: captionDims.height,
+      fontName: EXPORT_FONT_FAMILY,
     });
     await ffmpeg.writeFile(path, new TextEncoder().encode(ass));
     layerFiles.push(path);
-    filter += `;${videoMap}ass=filename=${path}:original_size=${captionDims.width}x${captionDims.height}[vl${layerSequence}]`;
+    filter += `;${videoMap}ass=filename=${path}:fontsdir=${EXPORT_FONT_DIR}:original_size=${captionDims.width}x${captionDims.height}[vl${layerSequence}]`;
     videoMap = `[vl${layerSequence++}]`;
-    wroteLayers = true;
   }
 
   for (const layer of layersToRender) {
     const sourceDuration = captions?.duration ?? editedDuration;
-    const originalTiming = layerTiming(layer, sourceDuration);
+    const originalTiming = renderLayerTiming(layer, sourceDuration);
     const layerStart = originalToEdited(originalTiming.start, captions?.cuts ?? []);
     const layerEnd = originalToEdited(originalTiming.end, captions?.cuts ?? []);
     if (layer.type === "text") {
       if (layer.source === "caption" && (!burnCaptions || !captions?.words.length)) {
         continue;
       }
+      if (layer.source === "caption") {
+        const track = await writeCaptionRasterTrack(
+          ffmpeg,
+          captions!.words,
+          captions!.cuts,
+          captions!.duration,
+          editedDuration,
+          layer,
+          captionDims.width,
+          captionDims.height,
+          layerStart,
+          layerEnd
+        );
+        if (!track) continue;
+        layerFiles.push(...track.files);
+        const captionInputIndex = imageInputIndex++;
+        layerInputArgs.push(
+          "-f",
+          "concat",
+          "-safe",
+          "0",
+          "-i",
+          track.concatPath
+        );
+        const captionLabel = `caption${layerSequence}`;
+        filter += `;[${captionInputIndex}:v]format=rgba,setpts=PTS-STARTPTS[${captionLabel}];${videoMap}[${captionLabel}]overlay=0:0:eof_action=pass:repeatlast=1[vl${layerSequence}]`;
+        videoMap = `[vl${layerSequence++}]`;
+        continue;
+      }
+      await ensureExportFont(ffmpeg);
       const path = `/layer-${layerSequence}.ass`;
-      const ass =
-        layer.source === "caption"
-          ? serializeCaptionAss(captions!.words, {
-              cuts: captions!.cuts,
-              duration: captions!.duration,
-              playResX: captionDims.width,
-              playResY: captionDims.height,
-              layer,
-              start: layerStart,
-              end: layerEnd,
-            })
-          : serializeStaticTextAss(
-              layer,
-              editedDuration,
-              captionDims.width,
-              captionDims.height,
-              layerStart,
-              layerEnd
-            );
+      const ass = serializeStaticTextAss(
+        layer,
+        editedDuration,
+        captionDims.width,
+        captionDims.height,
+        layerStart,
+        layerEnd,
+        EXPORT_FONT_FAMILY
+      );
       await ffmpeg.writeFile(path, new TextEncoder().encode(ass));
       layerFiles.push(path);
-      filter += `;${videoMap}ass=filename=${path}:original_size=${captionDims.width}x${captionDims.height}[vl${layerSequence}]`;
+      filter += `;${videoMap}ass=filename=${path}:fontsdir=${EXPORT_FONT_DIR}:original_size=${captionDims.width}x${captionDims.height}[vl${layerSequence}]`;
       videoMap = `[vl${layerSequence++}]`;
-      wroteLayers = true;
       continue;
     }
 
     const imagePath = `/layer-${layerSequence}${imageFileExtension(layer.src)}`;
     await ffmpeg.writeFile(imagePath, dataUrlBytes(layer.src));
     layerFiles.push(imagePath);
-    layerInputArgs.push("-loop", "1", "-framerate", "30", "-i", imagePath);
+    // Keep this as a single frame. Overlay repeats that frame while the main
+    // video advances, so image timestamps cannot corrupt export progress.
+    layerInputArgs.push("-i", imagePath);
     const width = even((layer.transform.width / 100) * captionDims.width);
     const height = even((layer.transform.height / 100) * captionDims.height);
     const x = Math.round((layer.transform.x / 100) * captionDims.width - width / 2);
@@ -442,16 +491,17 @@ export async function exportVideo(
       ? `crop=iw*${(crop.width / 100).toFixed(6)}:ih*${(crop.height / 100).toFixed(6)}:iw*${((crop.x - crop.width / 2) / 100).toFixed(6)}:ih*${((crop.y - crop.height / 2) / 100).toFixed(6)},`
       : "";
     const imageLabel = `img${layerSequence}`;
-    filter += `;[${imageInputIndex}:v]format=rgba,${cropFilter}scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}[${imageLabel}];${videoMap}[${imageLabel}]overlay=${x}:${y}:eof_action=repeat:enable='between(t,${layerStart.toFixed(3)},${layerEnd.toFixed(3)})'[vl${layerSequence}]`;
+    filter += `;[${imageInputIndex}:v]format=rgba,${cropFilter}scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}[${imageLabel}];${videoMap}[${imageLabel}]overlay=${x}:${y}:eof_action=repeat:repeatlast=1:enable='between(t,${layerStart.toFixed(3)},${layerEnd.toFixed(3)})'[vl${layerSequence}]`;
     videoMap = `[vl${layerSequence++}]`;
     imageInputIndex++;
-    wroteLayers = true;
   }
 
   const progressHandler = ({ time }: { progress: number; time: number }) => {
+    armStallTimer();
     // `time` is the output timestamp in microseconds.
     const ratio = Math.min(1, time / 1e6 / Math.max(0.001, editedDuration));
-    onProgress(Math.max(0, ratio));
+    // Reserve 100% for the point where the muxed file has actually been read.
+    onProgress(Math.min(0.99, Math.max(0, ratio)));
   };
   ffmpeg.on("progress", progressHandler);
   try {
@@ -470,7 +520,6 @@ export async function exportVideo(
             "-preset", "ultrafast",
             "-crf", "22",
             ...(withAudio ? ["-c:a", "aac", "-b:a", "192k"] : []),
-            "-movflags", "+faststart",
           ];
 
     const runExport = async (
@@ -478,6 +527,8 @@ export async function exportVideo(
       activeMap: string,
       extraInputs: string[] = []
     ) => {
+      stalled = false;
+      armStallTimer();
       const code = await ffmpeg.exec([
         "-i",
         input,
@@ -488,42 +539,52 @@ export async function exportVideo(
         activeMap,
         ...(withAudio ? ["-map", "[outa]"] : ["-an"]),
         ...codecArgs,
+        // Filters such as overlays can keep producing repeated frames after
+        // their primary input reaches EOF. Cap the muxed program explicitly.
+        "-t",
+        editedDuration.toFixed(3),
         "-y",
         out,
       ]);
+      clearStallTimer();
       if (code !== 0) throw new Error(en["error.videoExport"]);
     };
 
     try {
       await runExport(filter, videoMap, layerInputArgs);
     } catch (err) {
-      if (!wroteLayers) throw err;
-      const fallbackFilter =
-        parts.join(";") +
-        `;${labels.join("")}concat=n=${keepRanges.length}:v=1:a=${
-          withAudio ? 1 : 0
-        }[outv]${withAudio ? "[outa]" : ""}` +
-        (transform ? `;[outv]${transform}[vout]` : "");
-      const fallbackMap = transform ? "[vout]" : "[outv]";
-      await runExport(fallbackFilter, fallbackMap);
+      if (stalled) throw new Error(en["error.exportStalled"]);
+      throw err;
     }
-    const data = (await ffmpeg.readFile(out)) as Uint8Array;
-    await ffmpeg.deleteFile(out);
-    const buf = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
-    return new Blob([buf as ArrayBuffer], {
+    armStallTimer();
+    let data: Uint8Array;
+    try {
+      data = (await ffmpeg.readFile(out)) as Uint8Array;
+    } catch (readErr) {
+      if (stalled) throw new Error(en["error.exportStalled"]);
+      throw readErr;
+    }
+    clearStallTimer();
+    const buf =
+      data.byteOffset === 0 && data.byteLength === data.buffer.byteLength
+        ? (data.buffer as ArrayBuffer)
+        : data.slice().buffer;
+    const blob = new Blob([buf], {
       type: format === "webm" ? "video/webm" : "video/mp4",
     });
+    await ffmpeg.deleteFile(out);
+    onProgress(1);
+    return blob;
   } finally {
+    clearStallTimer();
     ffmpeg.off("progress", progressHandler);
-    await Promise.all(
-      layerFiles.map(async (path) => {
-        try {
-          await ffmpeg.deleteFile(path);
-        } catch {
-          // Best effort cleanup for temporary layer assets.
-        }
-      })
-    );
+    for (const path of layerFiles) {
+      try {
+        await ffmpeg.deleteFile(path);
+      } catch {
+        // Best effort cleanup for temporary layer assets.
+      }
+    }
   }
 }
 

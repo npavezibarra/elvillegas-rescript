@@ -30,6 +30,7 @@ import { FloatingPortal } from "@floating-ui/react";
 import { useEditorStore } from "@/lib/store";
 import { isDisfluencyPlaceholder } from "@/lib/disfluencies";
 import TranscriptToolsMenu from "./TranscriptToolsMenu";
+import TranscriptCorrectionDialog from "./TranscriptCorrectionDialog";
 import AiClipsPanel from "./AiClipsPanel";
 import {
   isTranscriptFile,
@@ -243,9 +244,12 @@ export default function TranscriptPanel() {
   const showDeleted = useEditorStore((s) => s.showDeleted);
   const toggleShowDeleted = useEditorStore((s) => s.toggleShowDeleted);
   const deleteWords = useEditorStore((s) => s.deleteWords);
-  const restoreWords = useEditorStore((s) => s.restoreWords);
+  const restoreRanges = useEditorStore((s) => s.restoreRanges);
   const cutRanges = useEditorStore((s) => s.cutRanges);
   const correctWords = useEditorStore((s) => s.correctWords);
+  const applyTranscriptCorrections = useEditorStore(
+    (s) => s.applyTranscriptCorrections
+  );
   const importWords = useEditorStore((s) => s.importWords);
   const removeSceneBoundary = useEditorStore((s) => s.removeSceneBoundary);
   const selectedWordIds = useEditorStore((s) => s.selectedWordIds);
@@ -284,6 +288,7 @@ export default function TranscriptPanel() {
   const importInputRef = useRef<HTMLInputElement>(null);
   const [correcting, setCorrecting] = useState<{ ids: number[] } | null>(null);
   const [correctText, setCorrectText] = useState("");
+  const [aiCorrectionOpen, setAiCorrectionOpen] = useState(false);
   const [assigningSpeaker, setAssigningSpeaker] = useState<{
     ids: number[];
   } | null>(null);
@@ -425,11 +430,21 @@ export default function TranscriptPanel() {
     clearSelection();
   }, [selection, deleteWords, clearSelection]);
 
-  const restoreSelection = useCallback(() => {
-    if (!selection) return;
-    restoreWords(selection.ids);
+  const selectionRange = useMemo(() => {
+    if (!selection || selection.ids.length === 0) return null;
+    const selectedWords = words.filter((w) => selection.ids.includes(w.id));
+    if (selectedWords.length === 0) return null;
+    return {
+      start: selectedWords[0]!.start,
+      end: selectedWords[selectedWords.length - 1]!.end,
+    };
+  }, [selection, words]);
+
+  const restoreSelection = () => {
+    if (!selectionRange) return;
+    restoreRanges([selectionRange]);
     clearSelection();
-  }, [selection, restoreWords, clearSelection]);
+  };
 
   const openCorrect = useCallback(() => {
     if (!selection) return;
@@ -537,7 +552,9 @@ export default function TranscriptPanel() {
               )}
             </span>
           )}
-          {status === "ready" && <TranscriptToolsMenu />}
+          {status === "ready" && (
+            <TranscriptToolsMenu onOpenCorrection={() => setAiCorrectionOpen(true)} />
+          )}
           {(status === "ready" || status === "error" || status === "transcribing") && (
             <>
               <label
@@ -788,6 +805,15 @@ export default function TranscriptPanel() {
         contentRef={containerRef}
         onUserScroll={markUserScrollGesture}
       />
+      {aiCorrectionOpen && (
+        <TranscriptCorrectionDialog
+          words={words}
+          selectedIds={selectedWordIds}
+          clipRange={selectedClipSegment}
+          onApply={applyTranscriptCorrections}
+          onClose={() => setAiCorrectionOpen(false)}
+        />
+      )}
     </section>
   );
 }

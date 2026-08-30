@@ -80,6 +80,10 @@ import {
   moveLayer,
   withLayerTiming,
 } from "./layers";
+import {
+  applyTranscriptSegmentCorrections,
+  type TranscriptSegmentCorrection,
+} from "./transcriptCorrection";
 
 interface PendingTranscript {
   name: string;
@@ -262,6 +266,10 @@ interface EditorState {
   restoreSelectedCut: () => boolean;
   /** Replace the selected (contiguous) words with corrected text. */
   correctWords: (ids: number[], text: string) => void;
+  /** Apply reviewed AI corrections as one undoable transcript edit. */
+  applyTranscriptCorrections: (
+    corrections: TranscriptSegmentCorrection[]
+  ) => void;
   /** Nudge a word's start/end on the timeline (may steal time from neighbors). */
   adjustWordBounds: (id: number, start: number, end: number) => void;
   /** Insert a scene boundary at the playhead. */
@@ -1047,6 +1055,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       // The corrected span is new words with new ids; nothing to stay selected.
       selectedWordIds: [],
     });
+  },
+
+  applyTranscriptCorrections: (corrections) => {
+    const next = applyTranscriptSegmentCorrections(get().words, corrections);
+    if (!next) return;
+    pushEdit(get, set, { words: next, selectedWordIds: [] });
   },
 
   adjustWordBounds: (id, start, end) => {

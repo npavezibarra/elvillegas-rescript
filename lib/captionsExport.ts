@@ -23,6 +23,9 @@ export interface CaptionBurnInOptions {
 }
 
 const DEFAULT_FONT = "Arial";
+const ACTIVE_CAPTION_BACKGROUND = "#fcd34d";
+const ACTIVE_CAPTION_TEXT = "#18181b";
+const CAPTION_END_GRACE_S = 0.15;
 
 /**
  * Build an ASS file with word-by-word karaoke highlighting for burn-in export.
@@ -47,11 +50,12 @@ export function serializeCaptionAss(
   }
 
   const textStyle = options.layer ? getTextLayerStyle(options.layer) : null;
-  const fontName = textStyle?.fontFamily ?? options.fontName ?? DEFAULT_FONT;
+  const fontName = options.fontName ?? textStyle?.fontFamily ?? DEFAULT_FONT;
   const fontSize = textStyle
     ? layerFontSize(textStyle.fontSize, options.playResY)
     : captionFontSize(options.playResX, options.playResY);
-  const outline = Math.max(2, Math.round(fontSize * 0.09));
+  const tracking = -Math.max(0.5, fontSize * 0.02).toFixed(2);
+  const activePadding = Math.max(4, Math.round(fontSize * 0.16));
   const marginV = options.marginV ?? Math.round(options.playResY * 0.085);
   const marginH = Math.max(32, Math.round(options.playResX * 0.05));
   const playResX = Math.max(2, Math.round(options.playResX));
@@ -68,7 +72,8 @@ export function serializeCaptionAss(
     "",
     "[V4+ Styles]",
     "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
-    `Style: Caption,${fontName},${fontSize},&H0000E5FF,${assColor(textStyle?.color ?? "#ffffff")},&H00000000,&H00000000,${textStyle && textStyle.fontWeight < 700 ? 0 : -1},0,0,0,100,100,0,0,1,${outline},${textStyle?.dropShadow === false ? 0 : 2},2,${marginH},${marginH},${marginV},1`,
+    `Style: Caption,${fontName},${fontSize},${assColor(textStyle?.color ?? "#ffffff")},${assColor(textStyle?.color ?? "#ffffff")},&H00000000,&H0D000000,${textStyle && textStyle.fontWeight < 700 ? 0 : -1},0,0,0,100,100,${tracking},0,1,0,${textStyle?.dropShadow === false ? 0 : 2},2,${marginH},${marginH},${marginV},1`,
+    `Style: Active,${fontName},${fontSize},${assColor(ACTIVE_CAPTION_TEXT)},${assColor(ACTIVE_CAPTION_TEXT)},${assColor(ACTIVE_CAPTION_BACKGROUND)},&HD14DD3FC,${textStyle && textStyle.fontWeight < 700 ? 0 : -1},0,0,0,103,103,${tracking},0,3,${activePadding},${textStyle?.dropShadow === false ? 0 : 2},2,${marginH},${marginH},${marginV},1`,
     "",
     "[Events]",
     "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
@@ -78,9 +83,19 @@ export function serializeCaptionAss(
   const layerEnd = options.end ?? Number.POSITIVE_INFINITY;
   for (const block of blocks) {
     if (block.end <= layerStart || block.start >= layerEnd) continue;
-    lines.push(
-      `Dialogue: 0,${formatAssTime(Math.max(block.start, layerStart))},${formatAssTime(Math.min(block.end, layerEnd))},Caption,,0,0,0,,${positionTag(options.layer, options.playResX, options.playResY)}${buildKaraokeLine(block.words)}`
-    );
+    block.words.forEach((word, wordIndex) => {
+      const nextWord = block.words[wordIndex + 1];
+      const start = Math.max(word.start, layerStart);
+      const end = Math.min(
+        word.end + CAPTION_END_GRACE_S,
+        nextWord?.start ?? Number.POSITIVE_INFINITY,
+        layerEnd
+      );
+      if (end <= start) return;
+      lines.push(
+        `Dialogue: 0,${formatAssTime(start)},${formatAssTime(end)},Caption,,0,0,0,,{\\rCaption}${positionTag(options.layer, options.playResX, options.playResY)}${buildActiveWordLine(block.words, wordIndex)}`
+      );
+    });
   }
 
   return lines.join("\n") + "\n";
@@ -93,7 +108,8 @@ export function serializeStaticTextAss(
   playResX: number,
   playResY: number,
   start = 0,
-  end = duration
+  end = duration,
+  fontName = getTextLayerStyle(layer).fontFamily
 ): string {
   const style = getTextLayerStyle(layer);
   const fontSize = layerFontSize(style.fontSize, playResY);
@@ -108,7 +124,7 @@ export function serializeStaticTextAss(
     "",
     "[V4+ Styles]",
     "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
-    `Style: Text,${style.fontFamily},${fontSize},${assColor(style.color)},${assColor(style.color)},&H00000000,&H00000000,${style.fontWeight < 700 ? 0 : -1},0,0,0,100,100,0,0,1,${outline},${style.dropShadow ? 2 : 0},5,0,0,0,1`,
+    `Style: Text,${fontName},${fontSize},${assColor(style.color)},${assColor(style.color)},&H00000000,&H00000000,${style.fontWeight < 700 ? 0 : -1},0,0,0,100,100,0,0,1,${outline},${style.dropShadow ? 2 : 0},5,0,0,0,1`,
     "",
     "[Events]",
     "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
@@ -138,16 +154,13 @@ function isWordKept(word: Word, cuts: TimeRange[]): boolean {
   return !cuts.some((c) => mid >= c.start && mid < c.end);
 }
 
-function buildKaraokeLine(words: Word[]): string {
+function buildActiveWordLine(words: Word[], activeIndex: number): string {
   return words
-    .map((word, i) => {
-      const next = words[i + 1];
-      const durS = next
-        ? Math.max(0.01, next.start - word.start)
-        : Math.max(0.01, word.end - word.start);
-      const centiseconds = Math.max(1, Math.round(durS * 100));
-      return `{\\k${centiseconds}}${escapeAssText(word.text)}`;
-    })
+    .map((word, index) =>
+      index === activeIndex
+        ? `{\\rActive}${escapeAssText(word.text)}{\\rCaption}`
+        : escapeAssText(word.text)
+    )
     .join(" ");
 }
 

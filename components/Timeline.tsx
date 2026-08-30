@@ -12,6 +12,7 @@ import {
 import {
   ChevronLeft,
   ChevronRight,
+  GripVertical,
   Maximize2,
   Merge,
   Pause,
@@ -45,7 +46,7 @@ import { useCutRanges } from "@/hooks/useCutRanges";
 import { useSelectedClipSegment } from "@/hooks/useSelectedClipSegment";
 import { useIsDark } from "@/hooks/useIsDark";
 import { useI18n } from "./I18nProvider";
-import { layerTiming } from "@/lib/layers";
+import { renderLayerTiming } from "@/lib/layers";
 
 const RULER_H = 18;
 const WORDBAR_H = 28;
@@ -93,6 +94,7 @@ type DragKind =
   | { type: "seek" }
   | { type: "word"; wordId: number; edge: "start" | "end"; origStart: number; origEnd: number }
   | { type: "layer"; layerId: string; edge: "start" | "end" }
+  | { type: "layer-order"; layerId: string; targetIndex: number }
   /**
    * `time` tracks where the dragged edge currently sits (mutated as the drag
    * moves); `lo`/`hi` bound it to this clip and the gap next to it, so an edge
@@ -108,6 +110,7 @@ export default function Timeline() {
   const duration = useEditorStore((s) => s.duration);
   const currentTime = useEditorStore((s) => s.currentTime);
   const playing = useEditorStore((s) => s.playing);
+  const aiClipPreviewRange = useEditorStore((s) => s.aiClipPreviewRange);
   const selectedClipIndex = useEditorStore((s) => s.selectedClipIndex);
   const selectedCutIndex = useEditorStore((s) => s.selectedCutIndex);
   const selectedWordIds = useEditorStore((s) => s.selectedWordIds);
@@ -154,6 +157,14 @@ export default function Timeline() {
   const timelineDuration = Math.max(0, timelineEnd - timelineStart);
   const timelineBase = selectedClipSegment ? timelineStart : 0;
   const timelineVisibleDuration = selectedClipSegment ? timelineDuration : duration;
+  const timelineLayers = useMemo(
+    () =>
+      layers.filter((layer) => {
+        const timing = renderLayerTiming(layer, duration);
+        return timing.end > timelineStart && timing.start < timelineEnd;
+      }),
+    [duration, layers, timelineEnd, timelineStart]
+  );
   const fitPps =
     selectedClipSegment && timelineDuration > 0 && width > 0
       ? width / timelineDuration
@@ -390,6 +401,23 @@ export default function Timeline() {
   // next play/pause: `scrollLeft` the follow effect did not write is theirs.
   const userScrolledRef = useRef(false);
   const autoScrollRef = useRef<number | null>(null);
+  const fitActiveRange = useCallback(() => {
+    const store = useEditorStore.getState();
+    // A click on a word/body selects one of the internal edit segments. When
+    // editing an imported AI clip, "Full clip" must leave that segment while
+    // preserving the AI clip range instead of expanding to the source video.
+    if (store.aiClipPreviewRange && store.selectedClipIndex != null) {
+      store.setSelectedClipIndex(null);
+      store.setSelectedCutIndex(null);
+      store.setSelectedWords([]);
+    }
+    userScrolledRef.current = false;
+    autoScrollRef.current = null;
+    pendingScrollRef.current = null;
+    setZoom(1);
+    setScrollLeft(0);
+    if (scrollRef.current) scrollRef.current.scrollLeft = 0;
+  }, []);
   useEffect(() => {
     userScrolledRef.current = false;
   }, [playing]);
@@ -524,6 +552,31 @@ export default function Timeline() {
         store.updateLayerTiming(drag.layerId, { [drag.edge]: t });
         return;
       }
+      if (drag.type === "layer-order") {
+        const bounds = outerRef.current?.getBoundingClientRect();
+        if (!bounds) return;
+        const currentLayers = store.layers;
+        const currentVisibleLayers = currentLayers.filter((layer) => {
+          const timing = renderLayerTiming(layer, store.duration);
+          return timing.end > timelineStart && timing.start < timelineEnd;
+        });
+        if (currentVisibleLayers.length === 0) return;
+        const laneTop = RULER_H + WORDBAR_H + 3;
+        const visualLane = Math.min(
+          currentVisibleLayers.length - 1,
+          Math.max(0, Math.round((e.clientY - bounds.top - laneTop) / 22))
+        );
+        // The top timeline lane is the front of the composition stack.
+        const targetLayer =
+          currentVisibleLayers[currentVisibleLayers.length - 1 - visualLane];
+        const targetIndex = currentLayers.findIndex(
+          (layer) => layer.id === targetLayer.id
+        );
+        if (targetIndex === drag.targetIndex) return;
+        store.moveLayerToIndex(drag.layerId, targetIndex);
+        drag.targetIndex = targetIndex;
+        return;
+      }
       if (drag.type === "trim") {
         const next = Math.min(Math.max(t, drag.lo), drag.hi);
         if (Math.abs(next - drag.time) < 1e-4) return;
@@ -532,7 +585,7 @@ export default function Timeline() {
         return;
       }
     },
-    [clips, cuts, pps, seekTo, splits, timeFromClientX]
+    [clips, cuts, pps, seekTo, splits, timeFromClientX, timelineEnd, timelineStart]
   );
 
   const onPointerLeave = useCallback(() => {
@@ -626,6 +679,19 @@ export default function Timeline() {
       const store = useEditorStore.getState();
       store.setSelectedLayerId(layerId);
       dragRef.current = { type: "layer", layerId, edge };
+      setDragging(true);
+    },
+    []
+  );
+
+  const startLayerOrderDrag = useCallback(
+    (e: ReactPointerEvent, layerId: string, index: number) => {
+      e.stopPropagation();
+      e.preventDefault();
+      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+      const store = useEditorStore.getState();
+      store.setSelectedLayerId(layerId);
+      dragRef.current = { type: "layer-order", layerId, targetIndex: index };
       setDragging(true);
     },
     []
@@ -840,12 +906,21 @@ export default function Timeline() {
             </button>
             <button
               type="button"
-              onClick={() => setZoom(1)}
-              disabled={zoom === 1}
-              title={t("timeline.fit")}
-              className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-lg text-zinc-500 transition hover:bg-zinc-100 hover:text-zinc-900 disabled:cursor-not-allowed disabled:text-zinc-300 disabled:hover:bg-transparent dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100 dark:disabled:text-zinc-600"
+              onClick={fitActiveRange}
+              disabled={
+                zoom === 1 &&
+                scrollLeft <= 1 &&
+                !(aiClipPreviewRange && selectedClipIndex != null)
+              }
+              title={
+                selectedClipSegment ? t("timeline.fitClip") : t("timeline.fit")
+              }
+              className="flex h-7 cursor-pointer items-center justify-center gap-1.5 rounded-lg px-2 text-zinc-500 transition hover:bg-zinc-100 hover:text-zinc-900 disabled:cursor-not-allowed disabled:text-zinc-300 disabled:hover:bg-transparent dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100 dark:disabled:text-zinc-600"
             >
               <Maximize2 size={13} />
+              <span className="hidden text-[11px] font-medium xl:inline">
+                {selectedClipSegment ? t("timeline.fitClip") : t("timeline.fit")}
+              </span>
             </button>
             <button
               type="button"
@@ -884,8 +959,9 @@ export default function Timeline() {
           <div className="relative h-full" style={{ width: totalWidth }}>
             {/* Overlay layers sit above the waveform. Drag either edge to set
                 the exact time range in which that text or image is visible. */}
-            {layers.map((layer, index) => {
-              const timing = layerTiming(layer, duration);
+            {timelineLayers.map((layer, visibleIndex) => {
+              const index = layers.findIndex((item) => item.id === layer.id);
+              const timing = renderLayerTiming(layer, duration);
               const start = Math.max(timing.start, timelineStart);
               const end = Math.min(timing.end, timelineEnd);
               if (end <= start) return null;
@@ -911,23 +987,40 @@ export default function Timeline() {
                   style={{
                     left: (start - timelineBase) * pps,
                     width: Math.max(8, (end - start) * pps),
-                    top: RULER_H + WORDBAR_H + 3 + (index % 2) * 22,
+                    top:
+                      RULER_H +
+                      WORDBAR_H +
+                      3 +
+                      (timelineLayers.length - 1 - visibleIndex) * 22,
                   }}
-                  title={`${layer.name}: ${formatTime(timing.start)} - ${formatTime(timing.end)}`}
+                  title={`${layer.name}: ${formatTime(timing.start)} - ${formatTime(timing.end)}. Arrastra verticalmente para cambiar el orden.`}
                 >
-                  <span className="pointer-events-none min-w-0 flex-1 truncate px-1.5">{layer.name}</span>
                   <span
                     data-tl-interactive
-                    onPointerDown={(e) => startLayerTimingDrag(e, layer.id, "start")}
-                    className="absolute -left-1 top-1/2 h-4 w-2 -translate-y-1/2 cursor-ew-resize rounded border border-white bg-current shadow-sm"
-                    aria-label={`Adjust ${layer.name} start`}
-                  />
-                  <span
-                    data-tl-interactive
-                    onPointerDown={(e) => startLayerTimingDrag(e, layer.id, "end")}
-                    className="absolute -right-1 top-1/2 h-4 w-2 -translate-y-1/2 cursor-ew-resize rounded border border-white bg-current shadow-sm"
-                    aria-label={`Adjust ${layer.name} end`}
-                  />
+                    onPointerDown={(e) => startLayerOrderDrag(e, layer.id, index)}
+                    className="flex h-full w-4 shrink-0 cursor-ns-resize items-center justify-center rounded-l hover:bg-black/5 dark:hover:bg-white/10"
+                    aria-label={`Reorder ${layer.name}`}
+                    title="Arrastra hacia arriba para poner al frente"
+                  >
+                    <GripVertical size={11} />
+                  </span>
+                  <span className="pointer-events-none min-w-0 flex-1 truncate pr-1.5">{layer.name}</span>
+                  {!caption && (
+                    <>
+                      <span
+                        data-tl-interactive
+                        onPointerDown={(e) => startLayerTimingDrag(e, layer.id, "start")}
+                        className="absolute -left-1 top-1/2 h-4 w-2 -translate-y-1/2 cursor-ew-resize rounded border border-white bg-current shadow-sm"
+                        aria-label={`Adjust ${layer.name} start`}
+                      />
+                      <span
+                        data-tl-interactive
+                        onPointerDown={(e) => startLayerTimingDrag(e, layer.id, "end")}
+                        className="absolute -right-1 top-1/2 h-4 w-2 -translate-y-1/2 cursor-ew-resize rounded border border-white bg-current shadow-sm"
+                        aria-label={`Adjust ${layer.name} end`}
+                      />
+                    </>
+                  )}
                 </div>
               );
             })}

@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { ChevronDown, ChevronUp } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { ChevronDown, ChevronUp, Crosshair } from "lucide-react";
 import { useEditorStore } from "@/lib/store";
 import {
   cutRangeAt,
@@ -14,8 +14,9 @@ import CropDialog from "./CropDialog";
 import LayerControls from "./LayerControls";
 import LayerPropertiesPanel from "./LayerPropertiesPanel";
 import StaticLayerOverlay from "./StaticLayerOverlay";
-import { getTextLayerStyle, layerTiming } from "@/lib/layers";
+import { getTextLayerStyle, renderLayerTiming } from "@/lib/layers";
 import type { ImageLayer } from "@/lib/types";
+import { getPreviewCaptionWords } from "@/lib/captions";
 
 /**
  * Owns the <video>/<audio> element and the cut-skipping playback loop.
@@ -79,6 +80,10 @@ export default function MediaPreview() {
   const imageCropLayer = layers.find(
     (layer): layer is ImageLayer =>
       layer.id === imageCropLayerId && layer.type === "image"
+  );
+  const captionWords = useMemo(
+    () => getPreviewCaptionWords(words, cuts, activePlaybackRange),
+    [activePlaybackRange, cuts, words]
   );
 
   const mediaRef = useRef<HTMLMediaElement | null>(null);
@@ -308,26 +313,25 @@ export default function MediaPreview() {
       ? bounds.width / bounds.height
       : canvasAspectRatio;
   };
-  const layoutButtonClass = (selected: boolean, disabled: boolean) =>
-    `flex h-7 items-center rounded-lg px-2 text-xs transition ${
-      disabled
-        ? "cursor-not-allowed text-zinc-300 dark:text-zinc-600"
-        : selected
-          ? "bg-zinc-100 font-medium text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100"
-          : "text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
-    }`;
+  const centerSelectedLayer = () => {
+    if (selectedLayer) {
+      updateLayerTransform(selectedLayer.id, { x: 50, y: 50 });
+      return;
+    }
+    if (videoSelected) updateVideoTransform({ x: 50, y: 50 });
+  };
 
   const renderLayers = () => (
     <>
       {layers.map((layer, index) => {
-        const timing = layerTiming(layer, duration);
+        const timing = renderLayerTiming(layer, duration);
         if (currentTime < timing.start || currentTime > timing.end) return null;
         if (layer.type === "text" && layer.source === "caption") {
           return (
             <CaptionOverlay
               key={layer.id}
               enabled={showCaptions}
-              words={words}
+              words={captionWords}
               currentTime={currentTime}
               transform={layer.transform}
               textStyle={getTextLayerStyle(layer)}
@@ -522,26 +526,19 @@ export default function MediaPreview() {
               )}
             </div>
 
-            <span className="mx-1 hidden h-5 w-px bg-zinc-200 sm:block dark:bg-zinc-700" />
-            <span className="hidden px-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-zinc-400 sm:inline dark:text-zinc-500">
-              LAYOUT
-            </span>
             <button
               type="button"
-              onClick={() => setExportPreviewLayout("fit")}
-              className={layoutButtonClass(exportPreviewLayout === "fit", false)}
+              onClick={centerSelectedLayer}
+              disabled={!selectedLayer && !videoSelected}
+              title="Align selected layer to center"
+              aria-label="Align selected layer to center"
+              className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-500 transition hover:bg-zinc-100 hover:text-zinc-900 disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
             >
-              Fit
-            </button>
-            <button
-              type="button"
-              onClick={() => setExportPreviewLayout("fill")}
-              className={layoutButtonClass(exportPreviewLayout === "fill", false)}
-            >
-              Fill
+              <Crosshair size={13} />
+              <span className="hidden xl:inline">Center</span>
             </button>
 
-            <span className="mx-1 h-5 w-px bg-zinc-200 dark:bg-zinc-700" />
+            <span className="mx-1 hidden h-5 w-px bg-zinc-200 sm:block dark:bg-zinc-700" />
             <button
               type="button"
               onClick={() => setShowCaptions(!showCaptions)}
@@ -565,7 +562,7 @@ export default function MediaPreview() {
             data-video-frame
             data-layer-surface
             ref={previewFrameRef}
-            className="relative flex-none overflow-hidden rounded-sm bg-black shadow-lg shadow-black/40"
+            className="relative flex-none overflow-hidden rounded-sm border border-zinc-500 bg-black shadow-lg shadow-black/40"
             style={
               previewFrameSize
                 ? previewFrameSize

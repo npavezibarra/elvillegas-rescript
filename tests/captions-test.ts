@@ -5,6 +5,7 @@
 import {
   buildCaptionBlocks,
   findActiveCaptionWord,
+  getPreviewCaptionWords,
 } from "../lib/captions";
 import type { Word } from "../lib/types";
 
@@ -22,6 +23,19 @@ const words: Word[] = [
   { id: 6, text: "mundo", start: 2.5, end: 2.85, speaker: 1, deleted: true },
   { id: 7, text: "otra", start: 2.9, end: 3.15, speaker: 1, deleted: false },
 ];
+
+{
+  const previewWords = getPreviewCaptionWords(
+    words,
+    [{ start: 1.6, end: 2.2 }],
+    { start: 0, end: 2.85 }
+  );
+  assert(
+    previewWords.map((word) => word.text).join(" ") === "Sigo con Rettig Hola",
+    `preview captions must match kept clip words: ${previewWords.map((word) => word.text).join(" ")}`
+  );
+  console.log("preview caption filtering: ok");
+}
 
 {
   const blocks = buildCaptionBlocks(words);

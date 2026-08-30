@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Captions,
   Clapperboard,
@@ -127,6 +127,8 @@ export default function ExportDialog() {
   const [timelineBusy, setTimelineBusy] = useState(false);
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [elapsedMs, setElapsedMs] = useState(0);
+  const exportStartedAtRef = useRef<number | null>(null);
 
   const cuts = useCutRanges();
   const selectedClip = useSelectedClipSegment();
@@ -215,6 +217,28 @@ export default function ExportDialog() {
     setProgress(0);
   }, [setExportUrl]);
 
+  const startElapsedTimer = useCallback(() => {
+    exportStartedAtRef.current = performance.now();
+    setElapsedMs(0);
+  }, []);
+
+  const stopElapsedTimer = useCallback(() => {
+    exportStartedAtRef.current = null;
+    setElapsedMs(0);
+  }, []);
+
+  useEffect(() => {
+    if (!dialogBusy) return;
+    const tick = () => {
+      const startedAt = exportStartedAtRef.current;
+      if (startedAt == null) return;
+      setElapsedMs(Math.max(0, performance.now() - startedAt));
+    };
+    tick();
+    const id = window.setInterval(tick, 250);
+    return () => window.clearInterval(id);
+  }, [dialogBusy, stopElapsedTimer]);
+
   const selectTab = useCallback(
     (next: ExportTab) => {
       setTab((prev) => {
@@ -283,6 +307,7 @@ export default function ExportDialog() {
 
     setError(null);
     setProgress(0);
+    startElapsedTimer();
     setStatus("exporting");
     try {
       const blob =
@@ -330,6 +355,7 @@ export default function ExportDialog() {
       setError(err instanceof Error ? err.message : en["error.export"]);
     } finally {
       setStatus("ready");
+      stopElapsedTimer();
     }
   }, [
     videoFile,
@@ -352,8 +378,10 @@ export default function ExportDialog() {
     videoTransform,
     videoCrop,
     videoEl,
+    startElapsedTimer,
     setStatus,
     setExportUrl,
+    stopElapsedTimer,
   ]);
 
   const exportText = useCallback(
@@ -388,6 +416,7 @@ export default function ExportDialog() {
     if (!videoFile) return;
     setTimelineBusy(true);
     setError(null);
+    startElapsedTimer();
     try {
       const videoEl = useEditorStore.getState().videoEl;
       const width =
@@ -414,6 +443,7 @@ export default function ExportDialog() {
       setError(err instanceof Error ? err.message : en["error.timelineExport"]);
     } finally {
       setTimelineBusy(false);
+      stopElapsedTimer();
     }
   }, [
     videoFile,
@@ -424,6 +454,8 @@ export default function ExportDialog() {
     baseName,
     isAudioProject,
     hasAudioTrack,
+    startElapsedTimer,
+    stopElapsedTimer,
   ]);
 
   if (!open) return null;
@@ -694,11 +726,20 @@ export default function ExportDialog() {
             <div>
               <div className="mb-2 flex items-center justify-between text-sm">
                 <span className="font-medium text-zinc-700 dark:text-zinc-200">
-                  {t("export.rendering")}
+                  {progress >= 0.99
+                    ? t("export.finalizing")
+                    : t("export.rendering")}
                 </span>
-                <span className="tabular-nums text-zinc-400 dark:text-zinc-500">
-                  {Math.round(progress * 100)}%
-                </span>
+                <div className="flex items-center gap-3">
+                  {progress < 0.99 && (
+                    <span className="tabular-nums text-zinc-400 dark:text-zinc-500">
+                      {Math.round(progress * 100)}%
+                    </span>
+                  )}
+                  <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-[11px] font-medium tabular-nums text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+                    {formatTime(elapsedMs / 1000)}
+                  </span>
+                </div>
               </div>
               <div className="h-2 overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800">
                 <div

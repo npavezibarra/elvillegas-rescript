@@ -1,7 +1,8 @@
 /**
  * Copies WASM runtime assets from node_modules into public/ so the app can be
  * served fully offline (no CDN requests at runtime):
- *   - @ffmpeg/core-mt  -> public/vendor/ffmpeg/  (audio extraction + export)
+ *   - @ffmpeg/core     -> public/vendor/ffmpeg/  (audio extraction + export)
+ *   - Geist Regular    -> public/vendor/fonts/   (ASS caption burn-in)
  *   - onnxruntime-web  -> public/vendor/ort/     (transformers.js inference)
  *   - parakeet.js ORT  -> public/vendor/ort-parakeet/ (Parakeet TDT inference)
  *   - assets/aaf       -> public/vendor/aaf/     (Pro Tools / Logic AAF scaffold)
@@ -20,12 +21,23 @@ import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-const ffmpegSrc = join(root, "node_modules/@ffmpeg/core-mt/dist/esm");
+// The multi-threaded core can deadlock indefinitely in Chromium/WebKit when a
+// scale filter is present. Exports always scale for 16:9/9:16 resolutions, so
+// use the single-threaded core for deterministic completion across browsers.
+const ffmpegSrc = join(root, "node_modules/@ffmpeg/core/dist/esm");
 const ffmpegDst = join(root, "public/vendor/ffmpeg");
 mkdirSync(ffmpegDst, { recursive: true });
 for (const f of readdirSync(ffmpegSrc)) {
   cpSync(join(ffmpegSrc, f), join(ffmpegDst, f));
 }
+
+const exportFontSrc = join(
+  root,
+  "node_modules/next/dist/compiled/@vercel/og/Geist-Regular.ttf"
+);
+const exportFontDst = join(root, "public/vendor/fonts/Geist-Regular.ttf");
+mkdirSync(dirname(exportFontDst), { recursive: true });
+cpSync(exportFontSrc, exportFontDst);
 
 // The @ffmpeg/ffmpeg "class worker" contains a dynamic import() that bundlers
 // cannot process; serve the package's own ESM build and point classWorkerURL

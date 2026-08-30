@@ -26,6 +26,7 @@ const runtimeMessageKeyList = [
   "error.extractAudio",
   "error.nothingToExport",
   "error.videoExport",
+  "error.exportStalled",
   "error.audioExport",
   "error.export",
   "error.timelineExport",

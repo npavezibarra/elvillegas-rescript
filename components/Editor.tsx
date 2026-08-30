@@ -324,7 +324,14 @@ export default function Editor() {
           const selected = s.words.filter((w) => s.selectedWordIds.includes(w.id));
           const allCutOut =
             selected.length > 0 && selected.every((w) => isWordCutOut(w, cuts));
-          if (allCutOut) s.restoreWords(s.selectedWordIds);
+          if (allCutOut) {
+            s.restoreRanges([
+              {
+                start: selected[0]!.start,
+                end: selected[selected.length - 1]!.end,
+              },
+            ]);
+          }
           else s.deleteWords(s.selectedWordIds);
           s.setSelectedWords([]);
           return;
