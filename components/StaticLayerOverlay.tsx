@@ -4,7 +4,7 @@
 
 import { useRef } from "react";
 import { DEFAULT_VIDEO_CROP, getTextLayerStyle } from "@/lib/layers";
-import type { EditorLayer, LayerTransform } from "@/lib/types";
+import type { ImageLayer, LayerTransform, TextLayer } from "@/lib/types";
 
 export default function StaticLayerOverlay({
   layer,
@@ -13,7 +13,7 @@ export default function StaticLayerOverlay({
   onCrop,
   onTransformChange,
 }: {
-  layer: Exclude<EditorLayer, { type: "text"; source: "caption" }>;
+  layer: ImageLayer | TextLayer;
   layerIndex: number;
   onSelect: () => void;
   onCrop?: () => void;

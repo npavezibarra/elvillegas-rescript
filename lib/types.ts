@@ -130,7 +130,15 @@ export interface ImageLayer extends LayerBase {
   cropAspectRatio?: number;
 }
 
-export type EditorLayer = TextLayer | ImageLayer;
+/** Another visual instance of the project's source video. */
+export interface VideoLayer extends LayerBase {
+  type: "video";
+  crop: LayerTransform;
+  /** Physical width/height ratio of the cropped source area. */
+  cropAspectRatio?: number;
+}
+
+export type EditorLayer = TextLayer | ImageLayer | VideoLayer;
 
 /** Messages posted from the transcription worker to the main thread. */
 export type WorkerResponse =

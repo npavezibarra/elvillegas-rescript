@@ -12,6 +12,7 @@ import type {
   SceneBoundary,
   SpeakerInfo,
   TimeRange,
+  VideoLayer,
   Word,
 } from "./types";
 import {
@@ -324,7 +325,13 @@ interface EditorState {
     transform: Partial<LayerTransform>,
     cropAspectRatio?: number
   ) => void;
+  updateVideoLayerCrop: (
+    id: string,
+    transform: Partial<LayerTransform>,
+    cropAspectRatio?: number
+  ) => void;
   setVideoSelected: (selected: boolean) => void;
+  duplicateVideoLayer: (sourceLayerId?: string) => string;
   addTextLayer: (text?: string) => string;
   addImageLayer: (src: string, name?: string, aspectRatio?: number) => string;
   addEndCardLayer: (
@@ -1485,7 +1492,52 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     });
     bumpAutosave();
   },
+  updateVideoLayerCrop: (id, transform, cropAspectRatio) => {
+    set((s) => {
+      const video = s.layers.find((layer) => layer.id === id && layer.type === "video");
+      if (!video || video.type !== "video") return {};
+      const crop = clampVideoCrop(transform, video.crop);
+      return {
+        layers: s.layers.map((layer) =>
+          layer.id === id && layer.type === "video"
+            ? { ...layer, crop, ...(cropAspectRatio ? { cropAspectRatio } : {}) }
+            : layer
+        ),
+      };
+    });
+    bumpAutosave();
+  },
   setVideoSelected: (videoSelected) => set({ videoSelected }),
+  duplicateVideoLayer: (sourceLayerId) => {
+    const id = crypto.randomUUID();
+    set((s) => {
+      const source = s.layers.find(
+        (layer): layer is VideoLayer =>
+          layer.id === sourceLayerId && layer.type === "video"
+      );
+      return {
+        layers: [
+          ...s.layers,
+          {
+            id,
+            name: `Video copy ${s.layers.filter((layer) => layer.type === "video").length + 1}`,
+            type: "video",
+            transform: { ...(source?.transform ?? s.videoTransform) },
+            crop: { ...(source?.crop ?? s.videoCrop) },
+            ...((source?.cropAspectRatio ?? s.videoCropAspectRatio)
+              ? { cropAspectRatio: source?.cropAspectRatio ?? s.videoCropAspectRatio ?? undefined }
+              : {}),
+            start: source?.start ?? 0,
+            end: source?.end ?? s.duration,
+          },
+        ],
+        selectedLayerId: id,
+        videoSelected: false,
+      };
+    });
+    bumpAutosave();
+    return id;
+  },
   addTextLayer: (text = "Text") => {
     const id = crypto.randomUUID();
     set((s) => ({
@@ -1627,7 +1679,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set((s) => {
       const current = s.layers.find((layer) => layer.id === id);
       if (!current) return {};
-      const nextTransform = clampLayerTransform(transform, current.transform);
+      const nextTransform = current.type === "video"
+        ? clampVideoTransform(transform, current.transform)
+        : clampLayerTransform(transform, current.transform);
       return {
         layers: s.layers.map((layer) =>
           layer.id === id ? { ...layer, transform: nextTransform } : layer
@@ -1703,7 +1757,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set((s) => ({ layers: moveLayer(s.layers, id, index) }));
     bumpAutosave();
   },
-  setSelectedLayerId: (selectedLayerId) => set({ selectedLayerId }),
+  setSelectedLayerId: (selectedLayerId) =>
+    set({ selectedLayerId, ...(selectedLayerId ? { videoSelected: false } : {}) }),
   requestMediaMenuOpen: () =>
     set((s) => ({ mediaMenuRequestId: s.mediaMenuRequestId + 1 })),
   setWorkspaceScreen: (workspaceScreen) =>

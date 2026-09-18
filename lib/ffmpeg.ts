@@ -394,6 +394,18 @@ export async function exportVideo(
   if (transform) {
     filter += `;[outv]${transform}[vout]`;
   }
+  const duplicateVideoLayers = layers.filter((layer) => layer.type === "video");
+  const duplicateVideoMaps = new Map<string, string>();
+  if (duplicateVideoLayers.length > 0) {
+    const primaryMap = "[videoPrimarySource]";
+    const copies = duplicateVideoLayers.map((layer, index) => {
+      const label = `[videoDuplicateSource${index}]`;
+      duplicateVideoMaps.set(layer.id, label);
+      return label;
+    });
+    filter += `;${videoMap}split=${copies.length + 1}${primaryMap}${copies.join("")}`;
+    videoMap = primaryMap;
+  }
   if (videoCrop && (videoCrop.width < 100 || videoCrop.height < 100 || videoCrop.x !== 50 || videoCrop.y !== 50)) {
     const width = even((videoCrop.width / 100) * captionDims.width);
     const height = even((videoCrop.height / 100) * captionDims.height);
@@ -523,6 +535,24 @@ export async function exportVideo(
       await ffmpeg.writeFile(path, new TextEncoder().encode(ass));
       layerFiles.push(path);
       filter += `;${videoMap}ass=filename=${path}:fontsdir=${EXPORT_FONT_DIR}:original_size=${captionDims.width}x${captionDims.height}[vl${layerSequence}]`;
+      videoMap = `[vl${layerSequence++}]`;
+      continue;
+    }
+
+    if (layer.type === "video") {
+      const sourceMap = duplicateVideoMaps.get(layer.id);
+      if (!sourceMap) continue;
+      const width = even((layer.transform.width / 100) * captionDims.width);
+      const height = even((layer.transform.height / 100) * captionDims.height);
+      const x = Math.round((layer.transform.x / 100) * captionDims.width - width / 2);
+      const y = Math.round((layer.transform.y / 100) * captionDims.height - height / 2);
+      const crop = layer.crop;
+      const cropFilter =
+        crop.width < 100 || crop.height < 100 || crop.x !== 50 || crop.y !== 50
+          ? `crop=iw*${(crop.width / 100).toFixed(6)}:ih*${(crop.height / 100).toFixed(6)}:iw*${((crop.x - crop.width / 2) / 100).toFixed(6)}:ih*${((crop.y - crop.height / 2) / 100).toFixed(6)},`
+          : "";
+      const duplicateLabel = `videoDuplicate${layerSequence}`;
+      filter += `;${sourceMap}${cropFilter}scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}[${duplicateLabel}];${videoMap}[${duplicateLabel}]overlay=${x}:${y}:eof_action=pass:repeatlast=1:enable='between(t,${layerStart.toFixed(3)},${layerEnd.toFixed(3)})'[vl${layerSequence}]`;
       videoMap = `[vl${layerSequence++}]`;
       continue;
     }

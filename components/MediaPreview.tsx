@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { ChevronDown, ChevronUp, Crosshair, FileImage, Film, ImagePlus, Loader2, Trash2, Upload } from "lucide-react";
+import { ChevronDown, ChevronUp, Copy, Crosshair, FileImage, Film, ImagePlus, Loader2, Trash2, Upload } from "lucide-react";
 import { useEditorStore } from "@/lib/store";
 import {
   cutRangeAt,
@@ -14,8 +14,9 @@ import CropDialog from "./CropDialog";
 import LayerControls from "./LayerControls";
 import LayerPropertiesPanel from "./LayerPropertiesPanel";
 import StaticLayerOverlay from "./StaticLayerOverlay";
+import VideoLayerOverlay from "./VideoLayerOverlay";
 import { getCompositionDuration, getTextLayerStyle, renderLayerTiming } from "@/lib/layers";
-import type { ImageLayer } from "@/lib/types";
+import type { ImageLayer, VideoLayer } from "@/lib/types";
 import { getPreviewCaptionWords } from "@/lib/captions";
 import { deleteMediaAsset, getMediaAsset, listMediaAssets, putMediaAsset, type MediaAssetMeta } from "@/lib/mediaAssets";
 
@@ -30,6 +31,7 @@ export default function MediaPreview() {
   const setVideoEl = useEditorStore((s) => s.setVideoEl);
   const setDuration = useEditorStore((s) => s.setDuration);
   const setPlaying = useEditorStore((s) => s.setPlaying);
+  const playing = useEditorStore((s) => s.playing);
   const setCurrentTime = useEditorStore((s) => s.setCurrentTime);
   const aiClipPreviewRange = useEditorStore((s) => s.aiClipPreviewRange);
   const activeClipRange = useEditorStore((s) => s.activeClipRange);
@@ -39,7 +41,6 @@ export default function MediaPreview() {
   const setExportPreviewAspectRatio = useEditorStore(
     (s) => s.setExportPreviewAspectRatio
   );
-  const exportPreviewLayout = useEditorStore((s) => s.exportPreviewLayout);
   const setExportPreviewLayout = useEditorStore(
     (s) => s.setExportPreviewLayout
   );
@@ -52,6 +53,7 @@ export default function MediaPreview() {
   const updateVideoTransform = useEditorStore((s) => s.updateVideoTransform);
   const updateVideoCrop = useEditorStore((s) => s.updateVideoCrop);
   const updateImageCrop = useEditorStore((s) => s.updateImageCrop);
+  const updateVideoLayerCrop = useEditorStore((s) => s.updateVideoLayerCrop);
   const setShowCaptions = useEditorStore((s) => s.setShowCaptions);
   const layers = useEditorStore((s) => s.layers);
   const selectedLayerId = useEditorStore((s) => s.selectedLayerId);
@@ -60,6 +62,7 @@ export default function MediaPreview() {
   const updateLayerTransform = useEditorStore((s) => s.updateLayerTransform);
   const updateTextLayer = useEditorStore((s) => s.updateTextLayer);
   const addTextLayer = useEditorStore((s) => s.addTextLayer);
+  const duplicateVideoLayer = useEditorStore((s) => s.duplicateVideoLayer);
   const addImageLayer = useEditorStore((s) => s.addImageLayer);
   const addEndCardLayer = useEditorStore((s) => s.addEndCardLayer);
   const removeLayer = useEditorStore((s) => s.removeLayer);
@@ -73,6 +76,7 @@ export default function MediaPreview() {
   );
   const [cropOpen, setCropOpen] = useState(false);
   const [imageCropLayerId, setImageCropLayerId] = useState<string | null>(null);
+  const [videoCropLayerId, setVideoCropLayerId] = useState<string | null>(null);
   const [ratioMenuOpen, setRatioMenuOpen] = useState(false);
   const [layersMenuOpen, setLayersMenuOpen] = useState(false);
   const [mediaMenuOpen, setMediaMenuOpen] = useState(false);
@@ -114,6 +118,9 @@ export default function MediaPreview() {
   const imageCropLayer = layers.find(
     (layer): layer is ImageLayer =>
       layer.id === imageCropLayerId && layer.type === "image"
+  );
+  const videoCropLayer = layers.find(
+    (layer): layer is VideoLayer => layer.id === videoCropLayerId && layer.type === "video"
   );
   const mediaRef = useRef<HTMLMediaElement | null>(null);
   const previewViewportRef = useRef<HTMLDivElement | null>(null);
@@ -446,10 +453,7 @@ export default function MediaPreview() {
 
   const selectedRatioLabel =
     selectedAspectRatio === "portrait" ? "9:16" : "16:9";
-  const transformedVideoClass =
-    exportPreviewLayout === "fit"
-      ? "h-full w-full select-none object-contain"
-      : "h-full w-full select-none object-cover";
+  const transformedVideoClass = "h-full w-full select-none object-fill";
   const applyVideoCrop = (
     crop: typeof videoCrop,
     visibleCropAspectRatio: number
@@ -497,6 +501,24 @@ export default function MediaPreview() {
             />
           );
         }
+        if (layer.type === "video") {
+          return (
+            <VideoLayerOverlay
+              key={layer.id}
+              layer={layer}
+              layerIndex={index}
+              src={mediaUrl!}
+              currentTime={currentTime}
+              playing={playing}
+              onSelect={() => {
+                setVideoSelected(false);
+                setSelectedLayerId(layer.id);
+              }}
+              onCrop={() => setVideoCropLayerId(layer.id)}
+              onTransformChange={(transform) => updateLayerTransform(layer.id, transform)}
+            />
+          );
+        }
         return (
           <StaticLayerOverlay
             key={layer.id}
@@ -514,7 +536,8 @@ export default function MediaPreview() {
           transform={selectedLayer.transform}
           onTransformChange={(transform) => updateLayerTransform(selectedLayer.id, transform)}
           lockAspectRatio={
-            selectedLayer.type === "image" && Boolean(selectedLayer.cropAspectRatio)
+            (selectedLayer.type === "image" || selectedLayer.type === "video") &&
+            Boolean(selectedLayer.cropAspectRatio)
           }
         />
       )}
@@ -668,7 +691,10 @@ export default function MediaPreview() {
                             });
                           }
                           layers.forEach((layer) => {
-                            if (layer.type !== "image" || !layer.cropAspectRatio) return;
+                            if (
+                              (layer.type !== "image" && layer.type !== "video") ||
+                              !layer.cropAspectRatio
+                            ) return;
                             updateLayerTransform(layer.id, {
                               height:
                                 (layer.transform.width * nextFrameAspectRatio) /
@@ -713,6 +739,27 @@ export default function MediaPreview() {
                   <p className="px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.16em] text-zinc-400 dark:text-zinc-500">
                     Stack order
                   </p>
+                  <div className="flex items-center gap-1 rounded-lg px-1 py-0.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedLayerId(null);
+                        setVideoSelected(true);
+                      }}
+                      className="min-w-0 flex-1 truncate px-1.5 py-1 text-left text-xs text-zinc-600 hover:text-zinc-950 dark:text-zinc-300 dark:hover:text-zinc-50"
+                    >
+                      Video
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => duplicateVideoLayer()}
+                      title="Duplicate video layer"
+                      aria-label="Duplicate video layer"
+                      className="rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+                    >
+                      <Copy size={12} />
+                    </button>
+                  </div>
                   {[...layers].reverse().map((layer) => {
                     const index = layers.findIndex((item) => item.id === layer.id);
                     const selected = selectedLayerId === layer.id;
@@ -748,6 +795,17 @@ export default function MediaPreview() {
                         >
                           <ChevronDown size={12} />
                         </button>
+                        {layer.type === "video" && (
+                          <button
+                            type="button"
+                            onClick={() => duplicateVideoLayer(layer.id)}
+                            title={`Duplicate ${layer.name}`}
+                            aria-label={`Duplicate ${layer.name}`}
+                            className="rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+                          >
+                            <Copy size={12} />
+                          </button>
+                        )}
                       </div>
                     );
                   })}
@@ -924,6 +982,24 @@ export default function MediaPreview() {
                 visibleCropAspectRatio,
             });
             setImageCropLayerId(null);
+          }}
+        />
+      )}
+      {videoCropLayer && mediaUrl && (
+        <CropDialog
+          src={mediaUrl}
+          kind="video"
+          currentTime={currentTime}
+          crop={videoCropLayer.crop}
+          onClose={() => setVideoCropLayerId(null)}
+          onApply={(crop, visibleCropAspectRatio) => {
+            updateVideoLayerCrop(videoCropLayer.id, crop, visibleCropAspectRatio);
+            updateLayerTransform(videoCropLayer.id, {
+              height:
+                (videoCropLayer.transform.width * getVisibleFrameAspectRatio()) /
+                visibleCropAspectRatio,
+            });
+            setVideoCropLayerId(null);
           }}
         />
       )}
