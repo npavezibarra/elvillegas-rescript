@@ -13,6 +13,7 @@ import {
   ChevronLeft,
   ChevronRight,
   GripVertical,
+  ImagePlus,
   Maximize2,
   Merge,
   Pause,
@@ -46,7 +47,7 @@ import { useCutRanges } from "@/hooks/useCutRanges";
 import { useSelectedClipSegment } from "@/hooks/useSelectedClipSegment";
 import { useIsDark } from "@/hooks/useIsDark";
 import { useI18n } from "./I18nProvider";
-import { renderLayerTiming } from "@/lib/layers";
+import { CAPTION_LAYER_ID, getCompositionDuration, renderLayerTiming } from "@/lib/layers";
 
 const RULER_H = 18;
 const WORDBAR_H = 28;
@@ -59,13 +60,14 @@ const SMALL_PPS = 22;
 const HANDLE_VIS_PPS = 40;
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 256;
-/** Wheel-zoom sensitivity (higher = faster zoom per scroll tick). */
+/** Pinch-zoom sensitivity (higher = faster zoom per trackpad gesture). */
 const ZOOM_SPEED = 0.0028;
 /** How close (px) the pointer must be to a split marker to reveal its join button. */
 const SPLIT_HOVER_PX = 10;
 /** Inset + radius for selected clip/cut outlines (`rounded-sm` ≈ 2px). */
 const SELECTION_INSET = 2;
 const SELECTION_RADIUS = 2;
+const OPTIONAL_EXTENSION_SECONDS = 3;
 
 /** Canvas path for a rounded rect (used to keep cut fills inside the selection ring). */
 function roundRectPath(
@@ -111,12 +113,14 @@ export default function Timeline() {
   const currentTime = useEditorStore((s) => s.currentTime);
   const playing = useEditorStore((s) => s.playing);
   const aiClipPreviewRange = useEditorStore((s) => s.aiClipPreviewRange);
+  const activeClipRange = useEditorStore((s) => s.activeClipRange);
   const selectedClipIndex = useEditorStore((s) => s.selectedClipIndex);
   const selectedCutIndex = useEditorStore((s) => s.selectedCutIndex);
   const selectedWordIds = useEditorStore((s) => s.selectedWordIds);
   const status = useEditorStore((s) => s.status);
   const layers = useEditorStore((s) => s.layers);
   const selectedLayerId = useEditorStore((s) => s.selectedLayerId);
+  const requestMediaMenuOpen = useEditorStore((s) => s.requestMediaMenuOpen);
 
   const selectedClipSegment = useSelectedClipSegment();
   const cuts = useCutRanges();
@@ -145,6 +149,9 @@ export default function Timeline() {
   const [height, setHeight] = useState(0);
   const [scrollLeft, setScrollLeft] = useState(0);
   const [zoom, setZoom] = useState(1);
+  // The active clip is always the base viewport. A clip is focused only by a
+  // deliberate double click, without changing which clip is selected.
+  const [focusedClip, setFocusedClip] = useState<ClipSegment | null>(null);
   const [hoveredWordId, setHoveredWordId] = useState<number | null>(null);
   const [hoveredClipIndex, setHoveredClipIndex] = useState<number | null>(null);
   const [hoveredCutIndex, setHoveredCutIndex] = useState<number | null>(null);
@@ -152,11 +159,50 @@ export default function Timeline() {
   const [hoveredSplitId, setHoveredSplitId] = useState<number | null>(null);
   const dark = useIsDark();
 
-  const timelineStart = selectedClipSegment?.start ?? 0;
-  const timelineEnd = selectedClipSegment?.end ?? duration;
+  // The imported/active clip range is authoritative. A previously focused
+  // source clip must never be able to widen this local composition again.
+  const activeScope = activeClipRange ?? aiClipPreviewRange ?? selectedClipSegment;
+  const timelineStart = activeScope?.start ?? focusedClip?.start ?? 0;
+  const scopeEnd = activeScope?.end ?? focusedClip?.end ?? duration;
+  const clipScoped = activeScope !== null || focusedClip !== null;
+  const compositionDuration = useMemo(
+    () => getCompositionDuration(layers, duration),
+    [duration, layers]
+  );
+  const transcriptScopeEnd = useMemo(() => {
+    const baseEnd = clipScoped ? scopeEnd : duration;
+    return words.reduce((end, word) => {
+      const intersectsScope =
+        word.end > timelineStart && word.start < baseEnd + 0.001;
+      return intersectsScope ? Math.max(end, word.end) : end;
+    }, baseEnd);
+  }, [clipScoped, duration, scopeEnd, timelineStart, words]);
+  const captionScopeEnd = useMemo(() => {
+    const captionLayer = layers.find((layer) => layer.id === CAPTION_LAYER_ID);
+    if (!captionLayer || clipScoped) return transcriptScopeEnd;
+    const timing = renderLayerTiming(captionLayer, duration);
+    return Math.max(transcriptScopeEnd, timing.end);
+  }, [clipScoped, duration, layers, transcriptScopeEnd]);
+  const scopedPostRollEnd = useMemo(() => {
+    if (!clipScoped) return captionScopeEnd;
+    return layers.reduce((end, layer) => {
+      if (layer.type !== "image" || !layer.postRoll) return end;
+      const timing = renderLayerTiming(layer, duration);
+      if (timing.start < captionScopeEnd - 0.001) return end;
+      return Math.max(end, timing.end);
+    }, captionScopeEnd);
+  }, [captionScopeEnd, clipScoped, duration, layers]);
+  const optionalAreaStart = clipScoped
+    ? scopedPostRollEnd
+    : Math.max(captionScopeEnd, compositionDuration);
+  // The optional area belongs to the current clip scope. It is intentionally
+  // outside the source-media range, so adding an end card never changes the
+  // boundaries used by cuts, words, or clip selection.
+  const timelineEnd = optionalAreaStart + OPTIONAL_EXTENSION_SECONDS;
   const timelineDuration = Math.max(0, timelineEnd - timelineStart);
-  const timelineBase = selectedClipSegment ? timelineStart : 0;
-  const timelineVisibleDuration = selectedClipSegment ? timelineDuration : duration;
+  const scopeKey = `${clipScoped ? "clip" : "video"}:${timelineStart.toFixed(4)}:${scopeEnd.toFixed(4)}`;
+  const timelineBase = clipScoped ? timelineStart : 0;
+  const timelineVisibleDuration = timelineDuration;
   const timelineLayers = useMemo(
     () =>
       layers.filter((layer) => {
@@ -166,11 +212,9 @@ export default function Timeline() {
     [duration, layers, timelineEnd, timelineStart]
   );
   const fitPps =
-    selectedClipSegment && timelineDuration > 0 && width > 0
-      ? width / timelineDuration
-      : duration > 0 && width > 0
-        ? width / duration
-        : 50;
+    timelineVisibleDuration > 0 && width > 0
+      ? width / timelineVisibleDuration
+      : 50;
   const pps = fitPps * zoom;
   const totalWidth = Math.max(
     width,
@@ -210,16 +254,10 @@ export default function Timeline() {
     durationRef.current = timelineVisibleDuration;
   }, [pps, zoom, width, timelineVisibleDuration]);
 
-  useEffect(() => {
-    const raf = requestAnimationFrame(() => {
-      setZoom(1);
-      setScrollLeft(0);
-    });
-    return () => cancelAnimationFrame(raf);
-  }, [selectedClipIndex]);
-
   // Scroll position to apply after a wheel-zoom re-renders the track width.
   const pendingScrollRef = useRef<number | null>(null);
+  const userScrolledRef = useRef(false);
+  const autoScrollRef = useRef<number | null>(null);
 
   useEffect(() => {
     const el = outerRef.current;
@@ -231,6 +269,34 @@ export default function Timeline() {
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
+
+  // A clip is a new local composition. Never carry the previous full-video
+  // scroll position or zoom into it, and clamp stale browser scroll state after
+  // the track width changes.
+  useEffect(() => {
+    userScrolledRef.current = false;
+    autoScrollRef.current = null;
+    pendingScrollRef.current = null;
+    const raf = requestAnimationFrame(() => {
+      setZoom(1);
+      setScrollLeft(0);
+      const el = scrollRef.current;
+      if (!el) return;
+      el.scrollLeft = 0;
+      setScrollLeft(0);
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [scopeKey]);
+
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const maxScroll = Math.max(0, el.scrollWidth - el.clientWidth);
+    if (el.scrollLeft > maxScroll) {
+      el.scrollLeft = maxScroll;
+      setScrollLeft(maxScroll);
+    }
+  }, [totalWidth, timelineEnd]);
 
   // Draw ruler + waveform + cut overlay + clip tint for the visible window.
   useEffect(() => {
@@ -368,10 +434,12 @@ export default function Timeline() {
     // overshoot hot sources produce, so the bar cannot spill into the wordbar.
     if (!waveform) return;
     const samplesPerPx = VAD_SAMPLE_RATE / pps;
+    const waveformEnd = transcriptScopeEnd;
     for (let x = 0; x < width; x++) {
       const localT = (scrollLeft + x) / pps;
       if (localT > timelineVisibleDuration) break;
       const t = timelineBase + localT;
+      if (t >= waveformEnd) break;
       const i0 = Math.floor(t * VAD_SAMPLE_RATE);
       const peak = peakBetween(waveform, i0, Math.floor(i0 + samplesPerPx) + 1);
       const inCut = cuts.some((c) => t >= c.start && t < c.end);
@@ -395,12 +463,12 @@ export default function Timeline() {
     dark,
     timelineBase,
     timelineVisibleDuration,
+    clipScoped,
+    transcriptScopeEnd,
   ]);
 
   // Panning or zooming during playback hands the window to the user until the
   // next play/pause: `scrollLeft` the follow effect did not write is theirs.
-  const userScrolledRef = useRef(false);
-  const autoScrollRef = useRef<number | null>(null);
   const fitActiveRange = useCallback(() => {
     const store = useEditorStore.getState();
     // A click on a word/body selects one of the internal edit segments. When
@@ -414,6 +482,7 @@ export default function Timeline() {
     userScrolledRef.current = false;
     autoScrollRef.current = null;
     pendingScrollRef.current = null;
+    setFocusedClip(null);
     setZoom(1);
     setScrollLeft(0);
     if (scrollRef.current) scrollRef.current.scrollLeft = 0;
@@ -438,16 +507,15 @@ export default function Timeline() {
     }
   }, [currentTime, playing, pps, width, timelineBase]);
 
-  // Vertical wheel / pinch zooms (anchored at the pointer); horizontal
-  // trackpad side-scroll pans via native overflow-x. Non-passive so zoom
-  // can preventDefault.
+  // Trackpad pinch events arrive as ctrl+wheel. Keep regular two-finger
+  // scrolling available for horizontal panning instead of zooming by accident.
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     const onWheel = (e: WheelEvent) => {
       if (durationRef.current <= 0) return;
-      // Horizontal intent → pan: don't preventDefault, let native scroll run.
-      if (!e.ctrlKey && Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
+      // Only the pinch gesture should zoom; regular trackpad scrolling pans.
+      if (!e.ctrlKey) return;
       e.preventDefault();
       const curZoom = zoomRef.current;
       const curPps = ppsRef.current;
@@ -489,10 +557,10 @@ export default function Timeline() {
       const localTime = (clientX - rect.left + el.scrollLeft) / pps;
       return Math.min(
         Math.max(0, localTime + timelineBase),
-        selectedClipSegment ? timelineEnd : duration
+        clipScoped ? timelineEnd : duration
       );
     },
-    [pps, duration, timelineBase, timelineEnd, selectedClipSegment]
+    [clipScoped, pps, duration, timelineBase, timelineEnd]
   );
 
   const seekTo = useCallback((t: number) => {
@@ -610,9 +678,26 @@ export default function Timeline() {
 
       const t = timeFromClientX(e.clientX);
       const clip = clips.find((c) => t >= c.start && t < c.end);
+      // Seeking inside a focused clip, including its optional layer extension,
+      // must not return the timeline to the full-video viewport.
+      const staysInFocusedScope =
+        focusedClip !== null &&
+        t >= focusedClip.start &&
+        t <= timelineEnd;
+      if (!staysInFocusedScope) setFocusedClip(null);
       const cutIdx = cuts.findIndex((c) => t >= c.start && t < c.end);
       const store = useEditorStore.getState();
-      if (cutIdx >= 0) {
+      const insideActiveClip =
+        activeClipRange !== null &&
+        t >= activeClipRange.start &&
+        t <= activeClipRange.end;
+      if (insideActiveClip) {
+        // Do not replace the AI clip scope with the underlying full-video
+        // segment when seeking inside an imported proposal.
+        store.setSelectedClipIndex(null);
+        store.setSelectedCutIndex(null);
+        store.setSelectedWords([]);
+      } else if (cutIdx >= 0) {
         store.setSelectedCutIndex(cutIdx);
         store.setSelectedWords([]);
       } else {
@@ -625,7 +710,32 @@ export default function Timeline() {
       e.currentTarget.setPointerCapture(e.pointerId);
       seekTo(t);
     },
-    [clips, cuts, seekTo, timeFromClientX]
+    [activeClipRange, clips, cuts, focusedClip, seekTo, timeFromClientX, timelineEnd]
+  );
+
+  const playheadX = (currentTime - timelineBase) * pps - scrollLeft;
+
+  const onTimelineDoubleClick = useCallback(
+    (e: React.MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (target.closest("[data-tl-interactive]")) return;
+      const timelineBounds = scrollRef.current?.getBoundingClientRect();
+      if (
+        timelineBounds &&
+        (e.clientY - timelineBounds.top <= RULER_H + 4 ||
+          Math.abs(e.clientX - (timelineBounds.left + playheadX)) <= 8)
+      ) {
+        return;
+      }
+      const t = timeFromClientX(e.clientX);
+      const clip = clips.find((item) => t >= item.start && t < item.end);
+      if (!clip) return;
+      setFocusedClip(clip);
+      setZoom(1);
+      setScrollLeft(0);
+      if (scrollRef.current) scrollRef.current.scrollLeft = 0;
+    },
+    [clips, playheadX, timeFromClientX]
   );
 
   const startWordDrag = useCallback(
@@ -735,7 +845,6 @@ export default function Timeline() {
     return words.filter((w) => w.end >= t0 && w.start <= t1);
   }, [words, pps, scrollLeft, width, timelineBase]);
 
-  const playheadX = (currentTime - timelineBase) * pps - scrollLeft;
   const showHandles = pps >= HANDLE_VIS_PPS;
 
   return (
@@ -910,16 +1019,22 @@ export default function Timeline() {
               disabled={
                 zoom === 1 &&
                 scrollLeft <= 1 &&
+                !focusedClip &&
+                !selectedClipSegment &&
                 !(aiClipPreviewRange && selectedClipIndex != null)
               }
               title={
-                selectedClipSegment ? t("timeline.fitClip") : t("timeline.fit")
+                focusedClip || selectedClipSegment
+                  ? t("timeline.fitClip")
+                  : t("timeline.fit")
               }
               className="flex h-7 cursor-pointer items-center justify-center gap-1.5 rounded-lg px-2 text-zinc-500 transition hover:bg-zinc-100 hover:text-zinc-900 disabled:cursor-not-allowed disabled:text-zinc-300 disabled:hover:bg-transparent dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100 dark:disabled:text-zinc-600"
             >
               <Maximize2 size={13} />
               <span className="hidden text-[11px] font-medium xl:inline">
-                {selectedClipSegment ? t("timeline.fitClip") : t("timeline.fit")}
+                {focusedClip || selectedClipSegment
+                  ? t("timeline.fitClip")
+                  : t("timeline.fit")}
               </span>
             </button>
             <button
@@ -951,6 +1066,7 @@ export default function Timeline() {
             setScrollLeft(next);
           }}
           onPointerDown={onBackgroundPointerDown}
+          onDoubleClick={onTimelineDoubleClick}
           onPointerMove={onPointerMove}
           onPointerLeave={onPointerLeave}
           className="scrollbar-thin absolute inset-0 touch-none overflow-x-auto overflow-y-hidden select-none"
@@ -963,7 +1079,9 @@ export default function Timeline() {
               const index = layers.findIndex((item) => item.id === layer.id);
               const timing = renderLayerTiming(layer, duration);
               const start = Math.max(timing.start, timelineStart);
-              const end = Math.min(timing.end, timelineEnd);
+              const layerEnd =
+                clipScoped && layer.id === CAPTION_LAYER_ID ? captionScopeEnd : timing.end;
+              const end = Math.min(layerEnd, timelineEnd);
               if (end <= start) return null;
               const selected = selectedLayerId === layer.id;
               const caption = layer.type === "text" && layer.source === "caption";
@@ -979,7 +1097,10 @@ export default function Timeline() {
                   onPointerDown={(e) => {
                     e.stopPropagation();
                     useEditorStore.getState().setSelectedLayerId(layer.id);
-                    seekTo(timing.start);
+                    // Post-roll media can live beyond the source video. Keep
+                    // the media playhead inside the active clip when selecting
+                    // that layer instead of seeking into the full composition.
+                    seekTo(clipScoped ? Math.min(timing.start, scopeEnd) : timing.start);
                   }}
                   className={`absolute z-[9] flex h-5 cursor-pointer items-center overflow-visible rounded border text-[9px] font-medium shadow-sm transition ${color} ${
                     selected ? "ring-2 ring-indigo-400/60" : "hover:brightness-95"
@@ -1024,6 +1145,32 @@ export default function Timeline() {
                 </div>
               );
             })}
+
+            {timelineEnd > optionalAreaStart && (
+              <div
+                className="pointer-events-none absolute z-[1] border-l border-dashed border-cyan-300/80 bg-cyan-50/45 dark:border-cyan-700/70 dark:bg-cyan-950/20"
+                style={{
+                  left: Math.max(0, (optionalAreaStart - timelineBase) * pps),
+                  width: Math.max(1, (timelineEnd - optionalAreaStart) * pps),
+                  top: RULER_H + WORDBAR_H,
+                  bottom: 0,
+                }}
+              >
+                <span className="absolute left-2 top-2 whitespace-nowrap text-[10px] font-medium text-cyan-700/80 dark:text-cyan-300/80">
+                  Optional ending area
+                </span>
+                <button
+                  type="button"
+                  data-tl-interactive
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onClick={requestMediaMenuOpen}
+                  className="pointer-events-auto absolute left-2 top-8 flex items-center gap-1 rounded-md border border-cyan-300 bg-white/85 px-2 py-1 text-[10px] font-medium text-cyan-800 shadow-sm transition hover:bg-white dark:border-cyan-700 dark:bg-zinc-900/85 dark:text-cyan-200 dark:hover:bg-zinc-900"
+                >
+                  <ImagePlus size={11} />
+                  Add image
+                </button>
+              </div>
+            )}
 
             {/* Split markers between touching clips — hover to reveal "join" */}
             {splits.map((b) => {

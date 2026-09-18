@@ -195,9 +195,13 @@ interface EditorState {
   /** Bottom-to-top visual stack rendered over the video frame. */
   layers: EditorLayer[];
   selectedLayerId: string | null;
+  /** Incremented when another surface wants the preview Media menu opened. */
+  mediaMenuRequestId: number;
   aiClipSuggestions: ClipSuggestion[];
   aiClipDurationRange: AiClipDurationRange;
   aiClipPreviewRange: TimeRange | null;
+  /** Immutable editing boundary while an AI clip is open in the editor. */
+  activeClipRange: TimeRange | null;
   /** Coarse-grained product phase used to route between top-level windows. */
   projectPhase: ProjectPhase;
   /** Which top-level window the app should show for the current project. */
@@ -323,6 +327,12 @@ interface EditorState {
   setVideoSelected: (selected: boolean) => void;
   addTextLayer: (text?: string) => string;
   addImageLayer: (src: string, name?: string, aspectRatio?: number) => string;
+  addEndCardLayer: (
+    src: string,
+    name?: string,
+    aspectRatio?: number,
+    startAt?: number
+  ) => string;
   updateLayerTransform: (id: string, transform: Partial<LayerTransform>) => void;
   updateLayerTiming: (id: string, timing: Partial<{ start: number; end: number }>) => void;
   updateTextLayer: (
@@ -332,11 +342,13 @@ interface EditorState {
   removeLayer: (id: string) => void;
   moveLayerToIndex: (id: string, index: number) => void;
   setSelectedLayerId: (id: string | null) => void;
+  requestMediaMenuOpen: () => void;
   setWorkspaceScreen: (screen: WorkspaceScreen) => void;
   setAiClipSuggestions: (suggestions: ClipSuggestion[]) => void;
   clearAiClipSuggestions: () => void;
   setAiClipDurationRange: (range: AiClipDurationRange) => void;
   setAiClipPreviewRange: (range: TimeRange | null) => void;
+  setActiveClipRange: (range: TimeRange | null) => void;
   previewAiClip: (range: TimeRange) => void;
   reset: () => void;
 }
@@ -395,6 +407,27 @@ function maxId(items: Array<{ id: number }>, fallback = 1): number {
   return items.reduce((m, x) => Math.max(m, x.id), fallback - 1) + 1;
 }
 
+function postRollEndAfter(
+  layers: EditorLayer[],
+  duration: number,
+  startAt: number
+): number {
+  return layers.reduce((end, layer) => {
+    if (layer.type !== "image" || !layer.postRoll) return end;
+    const timing = layerTiming(layer, duration);
+    if (timing.start < startAt - 0.001) return end;
+    return Math.max(end, timing.end);
+  }, startAt);
+}
+
+function clipTranscriptEnd(words: Word[], clip: TimeRange): number {
+  return words.reduce((end, word) => {
+    if (word.deleted) return end;
+    if (word.end <= clip.start || word.start >= clip.end + 0.001) return end;
+    return Math.max(end, word.end);
+  }, clip.end);
+}
+
 function pushEdit(
   get: () => EditorState,
   set: (
@@ -444,6 +477,7 @@ function withWorkflow(
     aiClipSuggestions: snapshot.aiClipSuggestions,
     selectedClipIndex: snapshot.selectedClipIndex,
     hasVideo: snapshot.videoFile !== null,
+    hasTranscript: snapshot.words.length > 0,
   });
   return {
     ...next,
@@ -500,9 +534,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   videoSelected: false,
   layers: [createCaptionLayer(DEFAULT_CAPTION_POSITION)],
   selectedLayerId: null,
+  mediaMenuRequestId: 0,
   aiClipSuggestions: [],
   aiClipDurationRange: DEFAULT_AI_CLIP_DURATION_RANGE,
   aiClipPreviewRange: null,
+  activeClipRange: null,
   projectPhase: "idle",
   workspaceScreen: "projects",
 
@@ -511,6 +547,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     if (!kind) return;
     const imported = options?.words;
     if (imported && imported.length === 0) return;
+    const sessionFile = new File([file], file.name, {
+      type: file.type,
+      lastModified: file.lastModified,
+    });
     const prev = get().mediaUrl;
     if (prev) URL.revokeObjectURL(prev);
     const current = get().source;
@@ -519,8 +559,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       : [];
     set(
       withWorkflow(get(), {
-      videoFile: file,
-      mediaUrl: URL.createObjectURL(file),
+      videoFile: sessionFile,
+      mediaUrl: URL.createObjectURL(sessionFile),
       mediaKind: kind,
       projectId: null,
       skipTranscription: Boolean(imported),
@@ -562,9 +602,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       videoSelected: false,
       layers: [createCaptionLayer(DEFAULT_CAPTION_POSITION)],
       selectedLayerId: null,
+      mediaMenuRequestId: 0,
       aiClipSuggestions: [],
       aiClipDurationRange: DEFAULT_AI_CLIP_DURATION_RANGE,
       aiClipPreviewRange: null,
+      activeClipRange: null,
       workspaceScreen: "projects",
       })
     );
@@ -647,6 +689,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       aiClipDurationRange:
         record.aiClipDurationRange ?? DEFAULT_AI_CLIP_DURATION_RANGE,
       aiClipPreviewRange: null,
+      activeClipRange: null,
       waveform: null,
       hasAudio: false,
       workspaceScreen: "clips",
@@ -713,6 +756,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       aiClipSuggestions: [],
       aiClipDurationRange: DEFAULT_AI_CLIP_DURATION_RANGE,
       aiClipPreviewRange: null,
+      activeClipRange: null,
       })
     );
     if (get().status === "ready") bumpAutosave();
@@ -749,6 +793,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       aiClipSuggestions: [],
       aiClipDurationRange: DEFAULT_AI_CLIP_DURATION_RANGE,
       aiClipPreviewRange: null,
+      activeClipRange: null,
       })
     );
     bumpAutosave();
@@ -1126,6 +1171,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         selectedWordIds: [],
         workspaceScreen: "editor",
       });
+      set({
+        activeClipRange: { start: existingClip.start, end: existingClip.end },
+      });
       return true;
     }
 
@@ -1165,6 +1213,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       selectedWordIds: [],
       workspaceScreen: "editor",
     });
+    if (selectedClip) {
+      set({
+        activeClipRange: { start: selectedClip.start, end: selectedClip.end },
+      });
+    }
     return true;
   },
 
@@ -1208,13 +1261,25 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   setSelectedClipIndex: (selectedClipIndex) =>
-    set((s) =>
-      withWorkflow(s, {
+    set((s) => {
+      const next = withWorkflow(s, {
         selectedClipIndex,
         workspaceScreen: selectedClipIndex != null ? "editor" : s.workspaceScreen,
         ...(selectedClipIndex != null ? { selectedCutIndex: null } : {}),
-      })
-    ),
+      });
+      if (selectedClipIndex == null) return next;
+
+      const cuts = getCutRanges(s.words, s.duration, s.manualCuts);
+      const clip = getSelectedClipSegment(
+        cuts,
+        s.duration,
+        s.sceneBoundaries,
+        selectedClipIndex
+      );
+      return clip
+        ? { ...next, activeClipRange: { start: clip.start, end: clip.end } }
+        : next;
+    }),
 
   setSelectedCutIndex: (selectedCutIndex) =>
     set((s) =>
@@ -1308,7 +1373,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   setCurrentTime: (currentTime) => set({ currentTime }),
   seekTo: (time) => {
     const media = get().videoEl;
-    if (media) media.currentTime = time;
+    if (media) media.currentTime = Math.min(Math.max(0, time), get().duration);
     set({ currentTime: time });
   },
   setPlaying: (playing) => set({ playing }),
@@ -1317,9 +1382,20 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const s = get();
     const media = s.videoEl;
     if (!media) return;
+    if (s.playing && media.paused) {
+      set({ playing: false });
+      return;
+    }
     if (media.paused) {
       const cuts = getCutRanges(s.words, s.duration, s.manualCuts);
-      const selectedClip = getSelectedClipSegment(
+      const selectedClip = s.activeClipRange
+        ? {
+            id: "active-clip",
+            start: s.activeClipRange.start,
+            end: s.activeClipRange.end,
+            index: -1,
+          }
+        : getSelectedClipSegment(
         cuts,
         s.duration,
         s.sceneBoundaries,
@@ -1334,11 +1410,21 @@ export const useEditorStore = create<EditorState>((set, get) => ({
             }
           : null);
       if (selectedClip) {
+        const selectedClipEnd = clipTranscriptEnd(s.words, selectedClip);
         if (
           media.currentTime < selectedClip.start ||
-          media.currentTime > selectedClip.end
+          media.currentTime > selectedClipEnd
         ) {
           media.currentTime = selectedClip.start;
+        }
+        const postRollEnd = postRollEndAfter(s.layers, s.duration, selectedClipEnd);
+        if (
+          s.currentTime >= selectedClipEnd - 0.05 &&
+          s.currentTime < postRollEnd - 0.01
+        ) {
+          media.pause();
+          set({ playing: true, currentTime: Math.max(s.currentTime, selectedClipEnd) });
+          return;
         }
       }
       const cut = cutRangeAt(media.currentTime, cuts);
@@ -1472,6 +1558,70 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     bumpAutosave();
     return id;
   },
+  addEndCardLayer: (src, name = "Closing image", aspectRatio, startAt) => {
+    const id = crypto.randomUUID();
+    set((s) => {
+      const cuts = getCutRanges(s.words, s.duration, s.manualCuts);
+      const activeScope = s.activeClipRange ?? s.aiClipPreviewRange;
+      const selectedClip = getSelectedClipSegment(
+        cuts,
+        s.duration,
+        s.sceneBoundaries,
+        s.selectedClipIndex
+      );
+      const clipEnd =
+        activeScope
+          ? clipTranscriptEnd(s.words, activeScope)
+          : selectedClip
+            ? clipTranscriptEnd(s.words, selectedClip)
+            : s.duration;
+      // An end card belongs to the active clip, including an LLM proposal that
+      // has no selectedClipIndex yet. It may legitimately start after the
+      // source video duration because it extends the composition.
+      const start = Math.max(
+        0,
+        startAt ?? clipEnd
+      );
+      const sourceAspectRatio =
+        aspectRatio && Number.isFinite(aspectRatio) && aspectRatio > 0
+          ? aspectRatio
+          : null;
+      const frameAspectRatio =
+        (s.exportPreviewAspectRatio ?? "landscape") === "portrait"
+          ? 9 / 16
+          : 16 / 9;
+      let width = 100;
+      let height = sourceAspectRatio
+        ? (width * frameAspectRatio) / sourceAspectRatio
+        : 100;
+      if (height < 100) {
+        width *= 100 / height;
+        height = 100;
+      }
+
+      return {
+        layers: [
+          ...s.layers,
+          {
+            id,
+            name,
+            type: "image",
+            src,
+            postRoll: true,
+            transform: { x: 50, y: 50, width, height },
+            crop: { ...DEFAULT_VIDEO_CROP },
+            ...(sourceAspectRatio ? { cropAspectRatio: sourceAspectRatio } : {}),
+            start,
+            end: start + 3,
+          },
+        ],
+        selectedLayerId: id,
+        currentTime: start,
+      };
+    });
+    bumpAutosave();
+    return id;
+  },
   updateLayerTransform: (id, transform) => {
     set((s) => {
       const current = s.layers.find((layer) => layer.id === id);
@@ -1493,7 +1643,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       layers: s.layers.map((layer) => {
         if (layer.id !== id) return layer;
         const current = layerTiming(layer, s.duration);
-        const minLength = Math.min(0.05, s.duration);
+        const postRoll = layer.type === "image" && layer.postRoll;
+        const minLength = postRoll ? 0.1 : Math.min(0.05, s.duration);
         const start = Math.max(
           0,
           Math.min(
@@ -1501,10 +1652,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
             (timing.end ?? current.end) - minLength
           )
         );
-        const end = Math.min(
-          s.duration,
-          Math.max(timing.end ?? current.end, start + minLength)
-        );
+        const end = postRoll
+          ? Math.max(timing.end ?? current.end, start + minLength)
+          : Math.min(
+              s.duration,
+              Math.max(timing.end ?? current.end, start + minLength)
+            );
         return { ...layer, start, end };
       }),
     }));
@@ -1550,7 +1703,14 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     bumpAutosave();
   },
   setSelectedLayerId: (selectedLayerId) => set({ selectedLayerId }),
-  setWorkspaceScreen: (workspaceScreen) => set({ workspaceScreen }),
+  requestMediaMenuOpen: () =>
+    set((s) => ({ mediaMenuRequestId: s.mediaMenuRequestId + 1 })),
+  setWorkspaceScreen: (workspaceScreen) =>
+    set(
+      workspaceScreen === "editor"
+        ? { workspaceScreen }
+        : { workspaceScreen, activeClipRange: null, aiClipPreviewRange: null }
+    ),
   setAiClipSuggestions: (aiClipSuggestions) =>
     set((s) => {
       const next = withWorkflow(s, {
@@ -1574,6 +1734,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
   setAiClipPreviewRange: (aiClipPreviewRange) =>
     set({ aiClipPreviewRange }),
+  setActiveClipRange: (activeClipRange) => set({ activeClipRange }),
   previewAiClip: (aiClipPreviewRange) => {
     set({ aiClipPreviewRange });
     const media = get().videoEl;
@@ -1632,6 +1793,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       aiClipSuggestions: [],
       aiClipDurationRange: DEFAULT_AI_CLIP_DURATION_RANGE,
       aiClipPreviewRange: null,
+      activeClipRange: null,
       projectPhase: "idle",
       workspaceScreen: "projects",
     });

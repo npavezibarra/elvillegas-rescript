@@ -73,6 +73,25 @@ export async function releaseFFmpeg(): Promise<void> {
   }
 }
 
+/**
+ * Forget a media engine that may be stuck while loading.
+ *
+ * A pending ffmpeg.load() cannot be synchronously terminated because the
+ * instance is not available yet. Detach it immediately so a retry can create a
+ * fresh worker, then terminate the old instance if it eventually resolves.
+ */
+export function resetFFmpeg(): void {
+  const pending = ffmpegPromise;
+  ffmpegPromise = null;
+  mountedFor = null;
+  if (!pending) return;
+  void pending
+    .then((ffmpeg) => ffmpeg.terminate())
+    .catch(() => {
+      // A rejected load has no live worker left to terminate.
+    });
+}
+
 function terminateFFmpegInstance(ffmpeg: FFmpeg): void {
   ffmpegPromise = null;
   mountedFor = null;
@@ -126,7 +145,10 @@ async function ensureExportFont(ffmpeg: FFmpeg): Promise<void> {
  * Works for both video and audio-only files. Resolves to null when the file
  * has no audio track — those still open for editing with an empty transcript.
  */
-export async function extractAudio(file: File): Promise<Float32Array | null> {
+export async function extractAudio(
+  file: File,
+  onProgress?: (progress: number) => void
+): Promise<Float32Array | null> {
   const ffmpeg = await getFFmpeg();
   const input = await ensureInput(ffmpeg, file);
   const out = "audio.pcm";
@@ -134,7 +156,12 @@ export async function extractAudio(file: File): Promise<Float32Array | null> {
   const logHandler = ({ message }: { type: string; message: string }) => {
     if (/Stream #\d+:\d+.*: Audio:/.test(message)) sawAudioStream = true;
   };
+  const progressHandler = ({ progress }: { progress: number; time: number }) => {
+    if (!Number.isFinite(progress)) return;
+    onProgress?.(Math.max(0, Math.min(0.98, progress)));
+  };
   ffmpeg.on("log", logHandler);
+  ffmpeg.on("progress", progressHandler);
   let code: number;
   try {
     code = await ffmpeg.exec([
@@ -147,6 +174,7 @@ export async function extractAudio(file: File): Promise<Float32Array | null> {
     ]);
   } finally {
     ffmpeg.off("log", logHandler);
+    ffmpeg.off("progress", progressHandler);
   }
   if (code !== 0) {
     if (!sawAudioStream) return null;
@@ -388,6 +416,25 @@ export async function exportVideo(
   let layerSequence = 0;
   let imageInputIndex = 1;
   const layersToRender = layers.length > 0 ? layers : [];
+  const postRollDuration = layersToRender.reduce((max, layer) => {
+    if (layer.type !== "image" || !layer.postRoll) return max;
+    const start = layer.start ?? 0;
+    const end = layer.end ?? start;
+    return Math.max(max, end - start);
+  }, 0);
+  const compositionDuration = editedDuration + postRollDuration;
+  let audioMap = withAudio ? "[outa]" : null;
+
+  if (postRollDuration > 0) {
+    // Extend only the rendered composition. The source media and its clip
+    // boundaries remain unchanged while the end card covers the final frame.
+    filter += `;${videoMap}tpad=stop_mode=clone:stop_duration=${postRollDuration.toFixed(3)}[vpostroll]`;
+    videoMap = "[vpostroll]";
+    if (withAudio) {
+      filter += `;[outa]apad=pad_dur=${postRollDuration.toFixed(3)}[apostroll]`;
+      audioMap = "[apostroll]";
+    }
+  }
   let stalled = false;
   let stallTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -423,8 +470,12 @@ export async function exportVideo(
   for (const layer of layersToRender) {
     const sourceDuration = captions?.duration ?? editedDuration;
     const originalTiming = renderLayerTiming(layer, sourceDuration);
-    const layerStart = originalToEdited(originalTiming.start, captions?.cuts ?? []);
-    const layerEnd = originalToEdited(originalTiming.end, captions?.cuts ?? []);
+    const layerStart = layer.type === "image" && layer.postRoll
+      ? editedDuration
+      : originalToEdited(originalTiming.start, captions?.cuts ?? []);
+    const layerEnd = layer.type === "image" && layer.postRoll
+      ? editedDuration + (originalTiming.end - originalTiming.start)
+      : originalToEdited(originalTiming.end, captions?.cuts ?? []);
     if (layer.type === "text") {
       if (layer.source === "caption" && (!burnCaptions || !captions?.words.length)) {
         continue;
@@ -435,7 +486,7 @@ export async function exportVideo(
           captions!.words,
           captions!.cuts,
           captions!.duration,
-          editedDuration,
+          compositionDuration,
           layer,
           captionDims.width,
           captionDims.height,
@@ -462,7 +513,7 @@ export async function exportVideo(
       const path = `/layer-${layerSequence}.ass`;
       const ass = serializeStaticTextAss(
         layer,
-        editedDuration,
+        compositionDuration,
         captionDims.width,
         captionDims.height,
         layerStart,
@@ -537,12 +588,12 @@ export async function exportVideo(
         activeFilter,
         "-map",
         activeMap,
-        ...(withAudio ? ["-map", "[outa]"] : ["-an"]),
+        ...(withAudio ? ["-map", audioMap ?? "[outa]"] : ["-an"]),
         ...codecArgs,
         // Filters such as overlays can keep producing repeated frames after
         // their primary input reaches EOF. Cap the muxed program explicitly.
         "-t",
-        editedDuration.toFixed(3),
+        compositionDuration.toFixed(3),
         "-y",
         out,
       ]);

@@ -19,6 +19,13 @@ const runtimeMessageKeyList = [
   "progress.downloadingAlign",
   "progress.aligning",
   "progress.speakers",
+  "progress.youtubeReadingDetails",
+  "progress.youtubeDetailsReady",
+  "progress.youtubeStartingBundled",
+  "progress.youtubeStarting",
+  "progress.youtubeDownloading",
+  "progress.youtubePreparing",
+  "progress.youtubeLoading",
   "error.selectModel",
   "error.workerCrashed",
   "error.mediaEngineNetwork",
@@ -44,6 +51,7 @@ const runtimeMessageKeyList = [
   "error.clearRecent",
   "error.modelDownload",
   "error.gpuReset",
+  "error.youtubeUnavailable",
 ] as const satisfies readonly MessageKey[];
 
 export type RuntimeMessageKey = (typeof runtimeMessageKeyList)[number];

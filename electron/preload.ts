@@ -1,5 +1,12 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
 
+type YouTubeImportProgress = {
+  id: string;
+  status: "starting" | "metadata" | "downloading" | "processing";
+  percent: number | null;
+  detail?: string;
+};
+
 /**
  * Minimal bridge for the renderer. Rescript's UI is still a normal web
  * surface; we only expose host metadata so the page can adapt chrome / skip
@@ -50,6 +57,21 @@ contextBridge.exposeInMainWorld("rescriptDesktop", {
     };
   },
   isFullScreen: (): Promise<boolean> => ipcRenderer.invoke("window:is-full-screen"),
+  importYouTubeVideo: (request: { id: string; url: string }) =>
+    ipcRenderer.invoke("youtube:import-video", request) as Promise<{
+      name: string;
+      type: string;
+      data: ArrayBuffer;
+    }>,
+  cancelYouTubeImport: (id: string) => ipcRenderer.invoke("youtube:cancel-import", id),
+  onYouTubeImportProgress: (callback: (progress: YouTubeImportProgress) => void) => {
+    const listener = (_event: IpcRendererEvent, progress: unknown) =>
+      callback(progress as YouTubeImportProgress);
+    ipcRenderer.on("youtube:import-progress", listener);
+    return () => {
+      ipcRenderer.off("youtube:import-progress", listener);
+    };
+  },
   onFullScreenChange: (callback: (value: boolean) => void) => {
     const listener = (_event: IpcRendererEvent, value: boolean) => callback(value);
     ipcRenderer.on("window:full-screen-changed", listener);

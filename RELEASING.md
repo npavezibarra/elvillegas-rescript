@@ -80,6 +80,33 @@ tree — those assets already live inside the static `out/` export. Auto-update 
 disabled in `npm run electron:dev` and only runs in packaged builds
 (`app.isPackaged`).
 
+## Bundling yt-dlp
+
+Desktop YouTube import first looks for `RESCRIPT_YTDLP_PATH`, then a bundled
+`yt-dlp`, then falls back to `yt-dlp` on the system PATH. `npm run dist`
+downloads the current platform binary automatically. `npm run release`
+downloads all packaged platform binaries automatically. To refresh manually,
+run:
+
+```sh
+npm run yt-dlp:download
+npm run yt-dlp:download:all
+```
+
+The binaries live under:
+
+```text
+build/yt-dlp/darwin-arm64/yt-dlp
+build/yt-dlp/darwin-x64/yt-dlp
+build/yt-dlp/linux-x64/yt-dlp
+build/yt-dlp/linux-arm64/yt-dlp
+build/yt-dlp/win32-x64/yt-dlp.exe
+build/yt-dlp/win32-arm64/yt-dlp.exe
+```
+
+electron-builder copies `build/yt-dlp` into the packaged app resources, outside
+the asar archive, so Electron can execute the binary at runtime.
+
 ## Notes
 
 - App icons live in `build/` (`icon.png` ≥512px). electron-builder derives

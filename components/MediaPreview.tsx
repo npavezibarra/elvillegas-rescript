@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { ChevronDown, ChevronUp, Crosshair } from "lucide-react";
+import { ChevronDown, ChevronUp, Crosshair, FileImage, Film, ImagePlus, Loader2, Trash2, Upload } from "lucide-react";
 import { useEditorStore } from "@/lib/store";
 import {
   cutRangeAt,
@@ -14,9 +14,10 @@ import CropDialog from "./CropDialog";
 import LayerControls from "./LayerControls";
 import LayerPropertiesPanel from "./LayerPropertiesPanel";
 import StaticLayerOverlay from "./StaticLayerOverlay";
-import { getTextLayerStyle, renderLayerTiming } from "@/lib/layers";
+import { getCompositionDuration, getTextLayerStyle, renderLayerTiming } from "@/lib/layers";
 import type { ImageLayer } from "@/lib/types";
 import { getPreviewCaptionWords } from "@/lib/captions";
+import { deleteMediaAsset, getMediaAsset, listMediaAssets, putMediaAsset, type MediaAssetMeta } from "@/lib/mediaAssets";
 
 /**
  * Owns the <video>/<audio> element and the cut-skipping playback loop.
@@ -31,7 +32,6 @@ export default function MediaPreview() {
   const setPlaying = useEditorStore((s) => s.setPlaying);
   const setCurrentTime = useEditorStore((s) => s.setCurrentTime);
   const aiClipPreviewRange = useEditorStore((s) => s.aiClipPreviewRange);
-  const setAiClipPreviewRange = useEditorStore((s) => s.setAiClipPreviewRange);
   const exportPreviewAspectRatio = useEditorStore(
     (s) => s.exportPreviewAspectRatio
   );
@@ -55,19 +55,29 @@ export default function MediaPreview() {
   const layers = useEditorStore((s) => s.layers);
   const selectedLayerId = useEditorStore((s) => s.selectedLayerId);
   const setSelectedLayerId = useEditorStore((s) => s.setSelectedLayerId);
+  const mediaMenuRequestId = useEditorStore((s) => s.mediaMenuRequestId);
   const updateLayerTransform = useEditorStore((s) => s.updateLayerTransform);
   const updateTextLayer = useEditorStore((s) => s.updateTextLayer);
   const addTextLayer = useEditorStore((s) => s.addTextLayer);
   const addImageLayer = useEditorStore((s) => s.addImageLayer);
+  const addEndCardLayer = useEditorStore((s) => s.addEndCardLayer);
   const removeLayer = useEditorStore((s) => s.removeLayer);
   const moveLayerToIndex = useEditorStore((s) => s.moveLayerToIndex);
   const words = useEditorStore((s) => s.words);
   const duration = useEditorStore((s) => s.duration);
   const currentTime = useEditorStore((s) => s.currentTime);
+  const compositionDuration = useMemo(
+    () => getCompositionDuration(layers, duration),
+    [duration, layers]
+  );
   const [cropOpen, setCropOpen] = useState(false);
   const [imageCropLayerId, setImageCropLayerId] = useState<string | null>(null);
   const [ratioMenuOpen, setRatioMenuOpen] = useState(false);
   const [layersMenuOpen, setLayersMenuOpen] = useState(false);
+  const [mediaMenuOpen, setMediaMenuOpen] = useState(false);
+  const [mediaAssets, setMediaAssets] = useState<MediaAssetMeta[]>([]);
+  const [mediaAssetUrls, setMediaAssetUrls] = useState<Record<string, string>>({});
+  const [mediaAssetsLoading, setMediaAssetsLoading] = useState(false);
   const [previewFrameSize, setPreviewFrameSize] = useState<{
     width: number;
     height: number;
@@ -76,16 +86,33 @@ export default function MediaPreview() {
   const cuts = useCutRanges();
   const selectedClipSegment = useSelectedClipSegment();
   const activePlaybackRange = selectedClipSegment ?? aiClipPreviewRange;
+  const captionWords = useMemo(
+    () => getPreviewCaptionWords(words, cuts, activePlaybackRange),
+    [activePlaybackRange, cuts, words]
+  );
+  const activePlaybackEnd = useMemo(
+    () =>
+      captionWords.reduce(
+        (end, word) => Math.max(end, word.end),
+        activePlaybackRange?.end ?? duration
+      ),
+    [activePlaybackRange, captionWords, duration]
+  );
+  const activeCompositionEnd = useMemo(
+    () =>
+      layers.reduce((end, layer) => {
+        if (layer.type !== "image" || !layer.postRoll) return end;
+        const timing = renderLayerTiming(layer, duration);
+        if (timing.start < activePlaybackEnd - 0.001) return end;
+        return Math.max(end, timing.end);
+      }, activePlaybackEnd),
+    [activePlaybackEnd, duration, layers]
+  );
   const selectedLayer = layers.find((layer) => layer.id === selectedLayerId);
   const imageCropLayer = layers.find(
     (layer): layer is ImageLayer =>
       layer.id === imageCropLayerId && layer.type === "image"
   );
-  const captionWords = useMemo(
-    () => getPreviewCaptionWords(words, cuts, activePlaybackRange),
-    [activePlaybackRange, cuts, words]
-  );
-
   const mediaRef = useRef<HTMLMediaElement | null>(null);
   const previewViewportRef = useRef<HTMLDivElement | null>(null);
   const previewFrameRef = useRef<HTMLDivElement | null>(null);
@@ -93,9 +120,19 @@ export default function MediaPreview() {
   const suppressVideoClick = useRef(false);
   const isAudio = mediaKind === "audio";
   const cutsRef = useRef(cuts);
+  const seenMediaMenuRequestId = useRef(mediaMenuRequestId);
+  const postRollClockRef = useRef<number | null>(null);
   useEffect(() => {
     cutsRef.current = cuts;
   }, [cuts]);
+
+  useEffect(() => {
+    if (mediaMenuRequestId === seenMediaMenuRequestId.current) return;
+    seenMediaMenuRequestId.current = mediaMenuRequestId;
+    setMediaMenuOpen(true);
+    setRatioMenuOpen(false);
+    setLayersMenuOpen(false);
+  }, [mediaMenuRequestId]);
 
   useEffect(() => {
     const media = mediaRef.current;
@@ -110,15 +147,34 @@ export default function MediaPreview() {
   }, [selectedClipSegment, setCurrentTime]);
 
   useEffect(() => {
-    if (!ratioMenuOpen && !layersMenuOpen) return;
+    if (!ratioMenuOpen && !layersMenuOpen && !mediaMenuOpen) return;
     const onMouseDown = (e: MouseEvent) => {
       if (toolbarRef.current?.contains(e.target as Node)) return;
       setRatioMenuOpen(false);
       setLayersMenuOpen(false);
+      setMediaMenuOpen(false);
     };
     document.addEventListener("mousedown", onMouseDown);
     return () => document.removeEventListener("mousedown", onMouseDown);
-  }, [layersMenuOpen, ratioMenuOpen]);
+  }, [layersMenuOpen, mediaMenuOpen, ratioMenuOpen]);
+
+  useEffect(() => {
+    if (!mediaMenuOpen) return;
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (!cancelled) setMediaAssetsLoading(true);
+    });
+    void listMediaAssets()
+      .then((assets) => {
+        if (!cancelled) setMediaAssets(assets);
+      })
+      .finally(() => {
+        if (!cancelled) setMediaAssetsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [mediaMenuOpen]);
 
   const selectedAspectRatio = exportPreviewAspectRatio ?? "landscape";
   const canvasAspectRatio =
@@ -162,13 +218,49 @@ export default function MediaPreview() {
     const tick = () => {
       const media = mediaRef.current;
       if (media) {
+        const now = performance.now();
         let t = media.currentTime;
+        const store = useEditorStore.getState();
+        const storeTime = store.currentTime;
+        if (
+          store.playing &&
+          media.paused &&
+          storeTime >= activePlaybackEnd - 0.02 &&
+          storeTime < activeCompositionEnd - 0.005
+        ) {
+          const last = postRollClockRef.current ?? now;
+          const nextTime = Math.min(
+            activeCompositionEnd,
+            Math.max(storeTime, activePlaybackEnd) + (now - last) / 1000
+          );
+          postRollClockRef.current = now;
+          setCurrentTime(nextTime);
+          if (nextTime >= activeCompositionEnd - 0.005) {
+            postRollClockRef.current = null;
+            setPlaying(false);
+          }
+          raf = requestAnimationFrame(tick);
+          return;
+        }
+        postRollClockRef.current = null;
         if (!media.paused) {
-          if (activePlaybackRange && t >= activePlaybackRange.end - 0.02) {
+          if (
+            activePlaybackRange &&
+            t >= activePlaybackEnd - 0.02 &&
+            activeCompositionEnd > activePlaybackEnd + 0.005
+          ) {
             media.pause();
-            media.currentTime = activePlaybackRange.end;
-            if (!selectedClipSegment) setAiClipPreviewRange(null);
-            t = activePlaybackRange.end;
+            media.currentTime = activePlaybackEnd;
+            setCurrentTime(activePlaybackEnd);
+            setPlaying(true);
+            postRollClockRef.current = now;
+            raf = requestAnimationFrame(tick);
+            return;
+          }
+          if (activePlaybackRange && t >= activePlaybackEnd - 0.02) {
+            media.pause();
+            media.currentTime = activePlaybackEnd;
+            t = activePlaybackEnd;
           } else if (
             activePlaybackRange &&
             t < activePlaybackRange.start - 0.02
@@ -189,8 +281,11 @@ export default function MediaPreview() {
             }
           }
         }
-        const prev = useEditorStore.getState().currentTime;
-        if (Math.abs(prev - t) > 0.005) setCurrentTime(t);
+        const showingPostRoll =
+          storeTime >= duration - 0.02 && compositionDuration > duration;
+        if (!showingPostRoll && Math.abs(storeTime - t) > 0.005) {
+          setCurrentTime(t);
+        }
       }
       raf = requestAnimationFrame(tick);
     };
@@ -198,9 +293,13 @@ export default function MediaPreview() {
     return () => cancelAnimationFrame(raf);
   }, [
     activePlaybackRange,
+    activePlaybackEnd,
+    activeCompositionEnd,
     selectedClipSegment,
-    setAiClipPreviewRange,
     setCurrentTime,
+    setPlaying,
+    compositionDuration,
+    duration,
   ]);
 
   const togglePlay = useCallback(() => {
@@ -271,6 +370,61 @@ export default function MediaPreview() {
     },
     [addImageLayer]
   );
+
+  const uploadMediaAssets = useCallback(async (files: FileList | File[]) => {
+    const selectedFiles = Array.from(files);
+    if (selectedFiles.length === 0) return;
+    setMediaAssetsLoading(true);
+    try {
+      const saved = await Promise.all(selectedFiles.map((file) => putMediaAsset(file)));
+      setMediaAssets((current) => [...saved, ...current]);
+    } finally {
+      setMediaAssetsLoading(false);
+    }
+  }, []);
+
+  const removeMediaAsset = useCallback(async (asset: MediaAssetMeta) => {
+    await deleteMediaAsset(asset.id);
+    setMediaAssets((current) => current.filter((item) => item.id !== asset.id));
+    setMediaAssetUrls((current) => {
+      const next = { ...current };
+      if (next[asset.id]) URL.revokeObjectURL(next[asset.id]);
+      delete next[asset.id];
+      return next;
+    });
+  }, []);
+
+  const insertMediaAsset = useCallback(async (asset: MediaAssetMeta) => {
+    if (!asset.type.startsWith("image/")) return;
+    const stored = await getMediaAsset(asset.id);
+    if (!stored) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const src = typeof reader.result === "string" ? reader.result : null;
+      if (!src) return;
+      const image = new window.Image();
+      image.onload = () => {
+        addEndCardLayer(src, stored.name, image.naturalWidth / image.naturalHeight);
+        setMediaMenuOpen(false);
+      };
+      image.src = src;
+    };
+    reader.readAsDataURL(stored.blob);
+  }, [addEndCardLayer]);
+
+  const loadAssetUrl = useCallback(async (asset: MediaAssetMeta) => {
+    if (mediaAssetUrls[asset.id]) return;
+    const stored = await getMediaAsset(asset.id);
+    if (!stored) return;
+    const url = URL.createObjectURL(stored.blob);
+    setMediaAssetUrls((current) => ({ ...current, [asset.id]: url }));
+  }, [mediaAssetUrls]);
+
+  useEffect(() => {
+    mediaAssets.forEach((asset) => {
+      void loadAssetUrl(asset);
+    });
+  }, [loadAssetUrl, mediaAssets]);
 
   if (!mediaUrl) return null;
 
@@ -384,6 +538,100 @@ export default function MediaPreview() {
           Preview
         </span>
         <div className="ml-auto flex items-center gap-1 sm:gap-2">
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setMediaMenuOpen((open) => !open)}
+                className={`flex h-7 items-center gap-1 rounded-lg px-2 text-[10px] font-semibold uppercase tracking-[0.16em] transition ${
+                  mediaMenuOpen
+                    ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-950/50 dark:text-indigo-300"
+                    : "text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+                }`}
+                aria-expanded={mediaMenuOpen}
+              >
+                MEDIA
+                <ChevronDown size={13} />
+              </button>
+              {mediaMenuOpen && (
+                <div className="absolute right-0 top-full z-30 mt-1 w-80 overflow-hidden rounded-xl border border-zinc-200 bg-white p-2 shadow-lg shadow-zinc-900/10 dark:border-zinc-700 dark:bg-zinc-900 dark:shadow-black/30">
+                  <div className="flex items-center justify-between px-1 pb-2">
+                    <div>
+                      <p className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">Media library</p>
+                      <p className="mt-0.5 text-[10px] text-zinc-400 dark:text-zinc-500">Saved on this device</p>
+                    </div>
+                    <label className="flex h-7 cursor-pointer items-center gap-1.5 rounded-lg bg-zinc-900 px-2.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-white transition hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-white">
+                      <Upload size={12} />
+                      Add
+                      <input
+                        type="file"
+                        multiple
+                        accept="image/*,video/*,audio/*"
+                        className="sr-only"
+                        onChange={(event) => {
+                          if (event.target.files) void uploadMediaAssets(event.target.files);
+                          event.target.value = "";
+                        }}
+                      />
+                    </label>
+                  </div>
+                  {mediaAssetsLoading && mediaAssets.length === 0 ? (
+                    <div className="flex items-center justify-center gap-2 py-8 text-xs text-zinc-400">
+                      <Loader2 size={14} className="animate-spin" /> Loading media…
+                    </div>
+                  ) : mediaAssets.length === 0 ? (
+                    <div className="rounded-lg border border-dashed border-zinc-200 px-4 py-8 text-center dark:border-zinc-700">
+                      <ImagePlus size={22} className="mx-auto mb-2 text-zinc-300 dark:text-zinc-600" />
+                      <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400">Your library is empty</p>
+                      <p className="mt-1 text-[10px] text-zinc-400 dark:text-zinc-500">Add images, GIFs, videos or audio files.</p>
+                    </div>
+                  ) : (
+                    <div className="grid max-h-72 grid-cols-3 gap-2 overflow-y-auto pr-0.5 scrollbar-thin">
+                      {mediaAssets.map((asset) => {
+                        const isImage = asset.type.startsWith("image/");
+                        const url = mediaAssetUrls[asset.id];
+                        return (
+                          <div key={asset.id} className="group relative overflow-hidden rounded-lg border border-zinc-200 bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-800">
+                            <button
+                              type="button"
+                              disabled={!isImage}
+                              onClick={() => void insertMediaAsset(asset)}
+                              className="block w-full text-left disabled:cursor-default"
+                              title={isImage ? "Add to timeline ending" : "Video and audio assets are stored for reuse"}
+                            >
+                              <div className="flex aspect-[4/3] items-center justify-center overflow-hidden bg-zinc-100 dark:bg-zinc-800">
+                                {url && isImage ? (
+                                  <img src={url} alt="" className="h-full w-full object-cover" />
+                                ) : url && asset.type.startsWith("video/") ? (
+                                  <video src={url} muted className="h-full w-full object-cover" />
+                                ) : isImage ? (
+                                  <FileImage size={20} className="text-zinc-400" />
+                                ) : (
+                                  <Film size={20} className="text-zinc-400" />
+                                )}
+                              </div>
+                              <p className="truncate px-1.5 py-1.5 text-[10px] font-medium text-zinc-600 dark:text-zinc-300">{asset.name}</p>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void removeMediaAsset(asset)}
+                              aria-label={`Delete ${asset.name}`}
+                              className="absolute right-1 top-1 rounded-md bg-black/60 p-1 text-white opacity-0 transition hover:bg-red-600 group-hover:opacity-100"
+                            >
+                              <Trash2 size={11} />
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {mediaAssetsLoading && mediaAssets.length > 0 && (
+                    <div className="flex items-center justify-center gap-1 pt-2 text-[10px] text-zinc-400">
+                      <Loader2 size={11} className="animate-spin" /> Saving…
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
             <div className="relative">
               <button
                 type="button"
@@ -615,7 +863,18 @@ export default function MediaPreview() {
                   setDuration(e.currentTarget.duration);
                 }}
                 onPlay={() => setPlaying(true)}
-                onPause={() => setPlaying(false)}
+                onPause={() => {
+                  const { currentTime: storeTime, playing: storePlaying } =
+                    useEditorStore.getState();
+                  if (
+                    storePlaying &&
+                    storeTime >= activePlaybackEnd - 0.02 &&
+                    storeTime < activeCompositionEnd - 0.005
+                  ) {
+                    return;
+                  }
+                  setPlaying(false);
+                }}
                 className={transformedVideoClass}
               />
             </div>

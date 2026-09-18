@@ -8,9 +8,18 @@ import {
   net,
   type WebContents,
 } from "electron";
+import { spawn } from "node:child_process";
+import {
+  existsSync,
+  chmodSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+} from "node:fs";
 import { join, normalize, extname } from "node:path";
 import { pathToFileURL } from "node:url";
-import { existsSync, statSync } from "node:fs";
 import { initMainSentry, setMainTelemetryEnabled } from "./sentry";
 import { initAutoUpdater } from "./updater";
 import {
@@ -28,6 +37,24 @@ import {
 const isDev = !app.isPackaged;
 const DEV_SERVER_URL = process.env.ELECTRON_START_URL ?? "http://localhost:3000";
 const isMac = process.platform === "darwin";
+
+type YouTubeImportResult = {
+  name: string;
+  type: string;
+  data: ArrayBuffer;
+};
+
+type YouTubeImportProgress = {
+  id: string;
+  status: "starting" | "metadata" | "downloading" | "processing";
+  percent: number | null;
+  detail?: string;
+};
+
+type ActiveYouTubeImport = {
+  child: ReturnType<typeof spawn>;
+  outputDir: string;
+};
 
 type WindowMode = "compact" | "expanded";
 
@@ -64,6 +91,27 @@ const MIME: Record<string, string> = {
   ".map": "application/json",
   ".txt": "text/plain; charset=utf-8",
 };
+
+const MEDIA_MIME: Record<string, string> = {
+  ".mp4": "video/mp4",
+  ".m4v": "video/mp4",
+  ".webm": "video/webm",
+  ".mov": "video/quicktime",
+  ".mp3": "audio/mpeg",
+  ".m4a": "audio/mp4",
+  ".wav": "audio/wav",
+  ".ogg": "audio/ogg",
+};
+
+const activeYouTubeImports = new Map<string, ActiveYouTubeImport>();
+const MAX_YOUTUBE_IMPORT_DURATION_SECONDS = 4 * 60 * 60;
+const MAX_YOUTUBE_IMPORT_BYTES = 2 * 1024 * 1024 * 1024;
+const YTDLP_UNAVAILABLE_MESSAGE =
+  "yt-dlp is not available. Bundle it with Rescript, set RESCRIPT_YTDLP_PATH, or install yt-dlp and try again.";
+
+function executableName(base: string): string {
+  return process.platform === "win32" ? `${base}.exe` : base;
+}
 
 // At module scope, before `app.whenReady()`: a crash while registering the
 // protocol or resolving the static root happens before any window exists, and
@@ -136,6 +184,353 @@ function registerAppProtocol(): void {
       headers,
     });
   });
+}
+
+function bufferToArrayBuffer(buffer: Buffer): ArrayBuffer {
+  return buffer.buffer.slice(
+    buffer.byteOffset,
+    buffer.byteOffset + buffer.byteLength
+  ) as ArrayBuffer;
+}
+
+function isHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function ytDlpPathEnv(): string {
+  const extra =
+    process.platform === "darwin"
+      ? ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+      : ["/usr/local/bin", "/usr/bin", "/bin"];
+  return [...extra, process.env.PATH ?? ""].filter(Boolean).join(":");
+}
+
+function platformResourceSegment(): string {
+  return `${process.platform}-${process.arch}`;
+}
+
+function usableFile(path: string): boolean {
+  try {
+    return existsSync(path) && statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function ensureExecutable(path: string): void {
+  if (process.platform === "win32") return;
+  try {
+    chmodSync(path, 0o755);
+  } catch {
+    // If chmod fails, let spawn surface the real execution error below.
+  }
+}
+
+function bundledYtDlpCandidates(): string[] {
+  const name = executableName("yt-dlp");
+  const segment = platformResourceSegment();
+  const candidates: string[] = [];
+  if (app.isPackaged) {
+    candidates.push(join(process.resourcesPath, "yt-dlp", segment, name));
+    candidates.push(join(process.resourcesPath, "yt-dlp", name));
+  } else {
+    candidates.push(join(process.cwd(), "build", "yt-dlp", segment, name));
+    candidates.push(join(process.cwd(), "build", "yt-dlp", name));
+  }
+  return candidates;
+}
+
+function resolveYtDlpCommand(): { command: string; bundled: boolean } {
+  const envPath = process.env.RESCRIPT_YTDLP_PATH;
+  if (envPath && usableFile(envPath)) {
+    ensureExecutable(envPath);
+    return { command: envPath, bundled: true };
+  }
+
+  for (const candidate of bundledYtDlpCandidates()) {
+    if (!usableFile(candidate)) continue;
+    ensureExecutable(candidate);
+    return { command: candidate, bundled: true };
+  }
+
+  return { command: "yt-dlp", bundled: false };
+}
+
+function formatDuration(seconds: number): string {
+  const rounded = Math.round(seconds);
+  const hours = Math.floor(rounded / 3600);
+  const minutes = Math.floor((rounded % 3600) / 60);
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  return `${minutes}m`;
+}
+
+function formatBytes(bytes: number): string {
+  const units = ["B", "KB", "MB", "GB"] as const;
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value >= 10 || unit === 0 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
+}
+
+function emitYouTubeProgress(
+  contents: WebContents,
+  progress: YouTubeImportProgress
+): void {
+  if (!contents.isDestroyed()) contents.send("youtube:import-progress", progress);
+}
+
+function runYtDlpJson(
+  id: string,
+  url: string,
+  outputDir: string
+): Promise<Record<string, unknown>> {
+  const ytDlp = resolveYtDlpCommand();
+  const args = ["--dump-single-json", "--no-playlist", "--skip-download", url];
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(ytDlp.command, args, {
+      env: { ...process.env, PATH: ytDlpPathEnv() },
+      windowsHide: true,
+    });
+    activeYouTubeImports.set(id, { child, outputDir });
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("error", (err) => {
+      activeYouTubeImports.delete(id);
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        reject(new Error(YTDLP_UNAVAILABLE_MESSAGE));
+        return;
+      }
+      reject(err);
+    });
+    child.on("close", (code) => {
+      activeYouTubeImports.delete(id);
+      if (child.killed && code !== 0) {
+        reject(new Error("YouTube import was cancelled."));
+        return;
+      }
+      if (code !== 0) {
+        reject(
+          new Error(stderr.trim() || `yt-dlp failed with exit code ${code ?? "unknown"}.`)
+        );
+        return;
+      }
+      try {
+        resolve(JSON.parse(stdout) as Record<string, unknown>);
+      } catch {
+        reject(new Error("yt-dlp returned unreadable video metadata."));
+      }
+    });
+  });
+}
+
+async function inspectYouTubeVideo(
+  url: string,
+  contents: WebContents,
+  id: string,
+  outputDir: string
+): Promise<void> {
+  emitYouTubeProgress(contents, {
+    id,
+    status: "metadata",
+    percent: null,
+    detail: "Reading video details...",
+  });
+
+  const metadata = await runYtDlpJson(id, url, outputDir);
+  const title = typeof metadata.title === "string" ? metadata.title : null;
+  const duration = typeof metadata.duration === "number" ? metadata.duration : null;
+  const filesize =
+    typeof metadata.filesize === "number"
+      ? metadata.filesize
+      : typeof metadata.filesize_approx === "number"
+        ? metadata.filesize_approx
+        : null;
+
+  if (duration !== null && duration > MAX_YOUTUBE_IMPORT_DURATION_SECONDS) {
+    throw new Error(
+      `This video is ${formatDuration(duration)} long. Rescript currently imports YouTube videos up to ${formatDuration(MAX_YOUTUBE_IMPORT_DURATION_SECONDS)}.`
+    );
+  }
+  if (filesize !== null && filesize > MAX_YOUTUBE_IMPORT_BYTES) {
+    throw new Error(
+      `This video is about ${formatBytes(filesize)}. Rescript currently imports YouTube videos up to ${formatBytes(MAX_YOUTUBE_IMPORT_BYTES)}.`
+    );
+  }
+
+  emitYouTubeProgress(contents, {
+    id,
+    status: "metadata",
+    percent: null,
+    detail: title ? `Importing "${title}"...` : "Video details ready...",
+  });
+}
+
+function parseYtDlpPercent(line: string): number | null {
+  const match = line.match(/\[download\]\s+(\d+(?:\.\d+)?)%/);
+  if (!match) return null;
+  const value = Number(match[1]);
+  return Number.isFinite(value) ? clamp(value, 0, 100) : null;
+}
+
+function cleanupImportDir(outputDir: string): void {
+  try {
+    rmSync(outputDir, { recursive: true, force: true });
+  } catch (err) {
+    console.warn("Failed to clean YouTube import directory.", err);
+  }
+}
+
+function runYtDlp(
+  id: string,
+  url: string,
+  outputDir: string,
+  contents: WebContents
+): Promise<void> {
+  const args = [
+    "--no-playlist",
+    "--restrict-filenames",
+    "--merge-output-format",
+    "mp4",
+    "-f",
+    "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/best",
+    "-o",
+    join(outputDir, "%(title).180B-%(id)s.%(ext)s"),
+    url,
+  ];
+
+  return new Promise((resolve, reject) => {
+    const ytDlp = resolveYtDlpCommand();
+    emitYouTubeProgress(contents, {
+      id,
+      status: "starting",
+      percent: null,
+      detail: ytDlp.bundled ? "Starting bundled yt-dlp..." : "Starting yt-dlp...",
+    });
+    const child = spawn(ytDlp.command, args, {
+      env: { ...process.env, PATH: ytDlpPathEnv() },
+      windowsHide: true,
+    });
+    activeYouTubeImports.set(id, { child, outputDir });
+    let stderr = "";
+    let cancelled = false;
+    let lastPercent: number | null = null;
+
+    const handleOutput = (chunk: Buffer) => {
+      const text = chunk.toString("utf8");
+      stderr += text;
+      for (const line of text.split(/\r?\n/)) {
+        const percent = parseYtDlpPercent(line);
+        if (percent === null || percent === lastPercent) continue;
+        lastPercent = percent;
+        emitYouTubeProgress(contents, {
+          id,
+          status: "downloading",
+          percent,
+          detail: "Downloading video...",
+        });
+      }
+      if (/\[Merger\]|\[ExtractAudio\]|\[VideoConvertor\]|\[Fixup\]/.test(text)) {
+        emitYouTubeProgress(contents, {
+          id,
+          status: "processing",
+          percent: 100,
+          detail: "Preparing media...",
+        });
+      }
+    };
+
+    child.stdout.on("data", handleOutput);
+    child.stderr.on("data", handleOutput);
+    child.on("error", (err) => {
+      activeYouTubeImports.delete(id);
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        reject(new Error(YTDLP_UNAVAILABLE_MESSAGE));
+        return;
+      }
+      reject(err);
+    });
+    child.on("close", (code) => {
+      activeYouTubeImports.delete(id);
+      cancelled = child.killed && code !== 0;
+      if (cancelled) {
+        reject(new Error("YouTube import was cancelled."));
+        return;
+      }
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(
+        new Error(
+          stderr.trim() || `yt-dlp failed with exit code ${code ?? "unknown"}.`
+        )
+      );
+    });
+  });
+}
+
+async function importYouTubeVideo(
+  id: string,
+  url: string,
+  contents: WebContents
+): Promise<YouTubeImportResult> {
+  const trimmed = url.trim();
+  if (!isHttpUrl(trimmed)) throw new Error("Enter a valid YouTube URL.");
+
+  const root = join(app.getPath("userData"), "youtube-imports");
+  mkdirSync(root, { recursive: true });
+  const outputDir = join(root, `${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  mkdirSync(outputDir, { recursive: true });
+
+  try {
+    await inspectYouTubeVideo(trimmed, contents, id, outputDir);
+    await runYtDlp(id, trimmed, outputDir, contents);
+
+    const candidates = readdirSync(outputDir)
+      .map((name) => {
+        const path = join(outputDir, name);
+        const stat = statSync(path);
+        return { name, path, stat };
+      })
+      .filter(({ name, stat }) => stat.isFile() && MEDIA_MIME[extname(name).toLowerCase()])
+      .sort((a, b) => b.stat.size - a.stat.size);
+
+    const downloaded = candidates[0];
+    if (!downloaded) throw new Error("yt-dlp finished, but no supported media file was found.");
+
+    emitYouTubeProgress(contents, {
+      id,
+      status: "processing",
+      percent: 100,
+      detail: "Loading media into Rescript...",
+    });
+
+    const ext = extname(downloaded.name).toLowerCase();
+    return {
+      name: downloaded.name,
+      type: MEDIA_MIME[ext] ?? "application/octet-stream",
+      data: bufferToArrayBuffer(readFileSync(downloaded.path)),
+    };
+  } catch (err) {
+    cleanupImportDir(outputDir);
+    throw err;
+  }
 }
 
 /** Tracks each window's current mode so repeated requests are no-ops. */
@@ -334,6 +729,26 @@ if (!gotLock) {
     "window:is-full-screen",
     (event) => BrowserWindow.fromWebContents(event.sender)?.isFullScreen() ?? false
   );
+  ipcMain.handle("youtube:import-video", async (event, value: unknown) => {
+    if (
+      !value ||
+      typeof value !== "object" ||
+      typeof (value as { id?: unknown }).id !== "string" ||
+      typeof (value as { url?: unknown }).url !== "string"
+    ) {
+      throw new Error("Enter a valid YouTube URL.");
+    }
+    const { id, url } = value as { id: string; url: string };
+    return importYouTubeVideo(id, url, event.sender);
+  });
+  ipcMain.handle("youtube:cancel-import", async (_event, value: unknown) => {
+    if (typeof value !== "string") return;
+    const active = activeYouTubeImports.get(value);
+    if (!active) return;
+    active.child.kill("SIGTERM");
+    cleanupImportDir(active.outputDir);
+    activeYouTubeImports.delete(value);
+  });
   // The renderer owns the preference; this mirrors it so the next launch can gate
   // reporting before any window exists.
   ipcMain.on("telemetry:set-enabled", (_event, value: unknown) => {

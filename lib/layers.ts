@@ -62,9 +62,22 @@ export function createCaptionLayer(
 }
 
 export function layerTiming(layer: EditorLayer, duration: number) {
+  if (layer.type === "image" && layer.postRoll) {
+    const start = Math.max(0, layer.start ?? duration);
+    const end = Math.max(start, layer.end ?? start + 3);
+    return { start, end };
+  }
   const start = clamp(layer.start ?? 0, 0, duration);
   const end = clamp(layer.end ?? duration, start, duration);
   return { start, end };
+}
+
+/** Duration of the rendered composition, including optional post-roll media. */
+export function getCompositionDuration(layers: EditorLayer[], duration: number) {
+  return Math.max(
+    duration,
+    ...layers.filter((layer) => layer.type === "image" && layer.postRoll).map((layer) => layerTiming(layer, duration).end)
+  );
 }
 
 /** Captions follow the transcript globally, even if an older project stored a stale range. */

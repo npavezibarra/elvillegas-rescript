@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef } from "react";
 import { Group, Panel, Separator, useDefaultLayout } from "react-resizable-panels";
 import { useEditorStore } from "@/lib/store";
 import { getCutRanges, isWordCutOut } from "@/lib/edits";
-import { extractAudio, getFFmpeg, releaseFFmpeg } from "@/lib/ffmpeg";
+import { extractAudio, getFFmpeg, releaseFFmpeg, resetFFmpeg } from "@/lib/ffmpeg";
 import { VAD_SAMPLE_RATE } from "@/lib/vad";
 import { isNetworkError } from "@/lib/network";
 import { isElectron } from "@/lib/platform";
@@ -36,20 +36,76 @@ import { isTypingTarget } from "@/lib/keyboard";
 import { en } from "@/lib/i18n/messages/en";
 import { useI18n } from "./I18nProvider";
 
+const HORIZONTAL_WORKSPACE_LAYOUT_KEY =
+  "react-resizable-panels:editor-workspace-horizontal:";
+const HORIZONTAL_WORKSPACE_MIGRATED_KEY =
+  "editor-workspace-horizontal-50-50";
+const MEDIA_PIPELINE_STALL_MS = 2 * 60 * 1000;
+
+function withStallWatch<T>(
+  work: (beat: () => void) => Promise<T>,
+  message: string
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let rejectStall: ((err: Error) => void) | null = null;
+  const clear = () => {
+    if (timer === null) return;
+    clearTimeout(timer);
+    timer = null;
+  };
+  const beat = () => {
+    clear();
+    timer = setTimeout(() => {
+      rejectStall?.(new Error(message));
+    }, MEDIA_PIPELINE_STALL_MS);
+  };
+  const stalled = new Promise<never>((_resolve, reject) => {
+    rejectStall = reject;
+    beat();
+  });
+  return Promise.race([work(beat), stalled]).finally(clear);
+}
+
+function shouldMigrateHorizontalWorkspaceLayout() {
+  if (typeof window === "undefined") return false;
+
+  const raw = window.localStorage.getItem(HORIZONTAL_WORKSPACE_LAYOUT_KEY);
+  if (!raw) return false;
+
+  try {
+    const layout = JSON.parse(raw) as Record<string, unknown>;
+    const transcript = layout.transcript;
+    const media = layout.media;
+    if (typeof transcript !== "number" || typeof media !== "number") {
+      return false;
+    }
+
+    // Migrate only the old 56/44-ish default so custom user layouts keep
+    // their own proportions.
+    return transcript > media && transcript >= 54 && transcript <= 58;
+  } catch {
+    return false;
+  }
+}
+
 /** Transcript and preview split, resizable in both orientations. Wide screens
  *  put the transcript first (left of the preview); stacked screens lead with
  *  the preview on top. Each orientation remembers its own sizes. */
 function SplitWorkspace({ orientation }: { orientation: "horizontal" | "vertical" }) {
   const horizontal = orientation === "horizontal";
+  const layoutId =
+    horizontal && shouldMigrateHorizontalWorkspaceLayout()
+      ? HORIZONTAL_WORKSPACE_MIGRATED_KEY
+      : `editor-workspace-${orientation}`;
   const { defaultLayout, onLayoutChanged } = useDefaultLayout({
-    id: `editor-workspace-${orientation}`,
+    id: layoutId,
     storage: typeof window !== "undefined" ? localStorage : undefined,
   });
 
   const preview = (
     <Panel
       id="media"
-      defaultSize={horizontal ? "44%" : "34vh"}
+      defaultSize={horizontal ? "50%" : "34vh"}
       minSize={horizontal ? 320 : 140}
       className="flex min-h-0 min-w-0 flex-col"
     >
@@ -59,7 +115,7 @@ function SplitWorkspace({ orientation }: { orientation: "horizontal" | "vertical
   const transcript = (
     <Panel
       id="transcript"
-      defaultSize={horizontal ? "56%" : "66%"}
+      defaultSize={horizontal ? "50%" : "66%"}
       minSize={horizontal ? "20%" : 160}
       className="flex min-h-0 min-w-0 flex-col"
     >
@@ -142,6 +198,7 @@ export default function Editor() {
   const setSelectedCutIndex = useEditorStore((s) => s.setSelectedCutIndex);
   const setSelectedWords = useEditorStore((s) => s.setSelectedWords);
   const setAiClipPreviewRange = useEditorStore((s) => s.setAiClipPreviewRange);
+  const setActiveClipRange = useEditorStore((s) => s.setActiveClipRange);
   const setWorkspaceScreen = useEditorStore((s) => s.setWorkspaceScreen);
   const { locale } = useI18n();
   const isSpanish = locale === "es";
@@ -209,10 +266,8 @@ export default function Editor() {
 
   // Processing pipeline: load ffmpeg -> extract audio -> (maybe) transcribe.
   // Restored projects already have words; they only need PCM for the waveform.
-  const startedFor = useRef<File | null>(null);
   useEffect(() => {
-    if (!videoFile || startedFor.current === videoFile) return;
-    startedFor.current = videoFile;
+    if (!videoFile) return;
     const restoreOnly = useEditorStore.getState().skipTranscription;
     let cancelled = false;
     (async () => {
@@ -226,10 +281,23 @@ export default function Editor() {
         } else {
           s.setProgress({ message: en["progress.loadingMediaEngine"], value: null });
         }
-        await getFFmpeg();
+        await withStallWatch(
+          async (beat) => {
+            await getFFmpeg();
+            beat();
+          },
+          "Media engine stopped responding while loading."
+        );
         if (cancelled) return;
-        s.setProgress({ message: en["progress.extractingAudio"], value: null });
-        const audio = await extractAudio(videoFile);
+        s.setProgress({ message: en["progress.extractingAudio"], value: 0 });
+        const audio = await withStallWatch(
+          (beat) =>
+            extractAudio(videoFile, (value) => {
+              beat();
+              s.setProgress({ message: en["progress.extractingAudio"], value });
+            }),
+          "Audio extraction stopped responding."
+        );
         if (cancelled) return;
         s.setAudio(audio);
         // ffmpeg's gigabyte is pure overhead from here until the user exports,
@@ -246,6 +314,7 @@ export default function Editor() {
         }
       } catch (err) {
         if (cancelled) return;
+        resetFFmpeg();
         console.error("Processing pipeline failed:", err);
         // Same reasoning as the worker's error path: a dropped connection while
         // pulling the media engine is the user's network, not a bug, and
@@ -378,6 +447,7 @@ export default function Editor() {
                     setSelectedClipIndex(null);
                     setSelectedCutIndex(null);
                     setSelectedWords([]);
+                    setActiveClipRange(null);
                     setAiClipPreviewRange(null);
                   }}
                   className="hidden h-8 items-center rounded-full border border-zinc-200 bg-white px-3 text-[13px] font-medium text-zinc-600 transition hover:bg-zinc-100 hover:text-zinc-900 sm:inline-flex dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
@@ -395,6 +465,7 @@ export default function Editor() {
                     setSelectedClipIndex(null);
                     setSelectedCutIndex(null);
                     setSelectedWords([]);
+                    setActiveClipRange(null);
                     setAiClipPreviewRange(null);
                   }}
                 className="flex h-8 items-center rounded-full bg-zinc-900 px-3 text-[13px] font-medium text-white transition hover:bg-zinc-700 cursor-pointer dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"

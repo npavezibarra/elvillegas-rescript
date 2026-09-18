@@ -21,6 +21,7 @@ export interface WorkflowInput {
   aiClipSuggestions: ClipSuggestion[];
   selectedClipIndex: number | null;
   hasVideo: boolean;
+  hasTranscript: boolean;
 }
 
 export function deriveProjectPhase({
@@ -28,6 +29,7 @@ export function deriveProjectPhase({
   aiClipSuggestions,
   selectedClipIndex,
   hasVideo,
+  hasTranscript,
 }: WorkflowInput): ProjectPhase {
   if (!hasVideo || status === "idle") return "idle";
   if (status === "error") return "error";
@@ -36,6 +38,7 @@ export function deriveProjectPhase({
   if (status === "preparing" || status === "transcribing") {
     return "processing";
   }
+  if (status === "ready" && !hasTranscript) return "processing";
   return "transcript_ready";
 }
 

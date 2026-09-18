@@ -12,6 +12,13 @@ export type MenuCommand =
   /** Leave the editor for the upload screen (an intercepted window close). */
   | { type: "close-project" };
 
+export type YouTubeImportProgress = {
+  id: string;
+  status: "starting" | "metadata" | "downloading" | "processing";
+  percent: number | null;
+  detail?: string;
+};
+
 /** Desktop bridge exposed by electron/preload.ts when running inside Electron. */
 export interface RescriptDesktop {
   platform: NodeJS.Platform;
@@ -31,6 +38,16 @@ export interface RescriptDesktop {
   /** Subscribe to File-menu actions; returns an unsubscribe function. */
   onMenuCommand: (callback: (command: MenuCommand) => void) => () => void;
   isFullScreen: () => Promise<boolean>;
+  /** Download a YouTube URL through yt-dlp and return the downloaded media. */
+  importYouTubeVideo: (request: { id: string; url: string }) => Promise<{
+    name: string;
+    type: string;
+    data: ArrayBuffer;
+  }>;
+  cancelYouTubeImport: (id: string) => Promise<void>;
+  onYouTubeImportProgress: (
+    callback: (progress: YouTubeImportProgress) => void
+  ) => () => void;
   /** Subscribe to full-screen changes; returns an unsubscribe function. */
   onFullScreenChange: (callback: (value: boolean) => void) => () => void;
 }

@@ -21,6 +21,11 @@ export interface AiTranscriptBlock {
   text: string;
 }
 
+export interface AiClipDurationConstraint {
+  min: number;
+  max: number;
+}
+
 const BLOCK_PREFIX = "B";
 const MIN_SENTENCE_BLOCK_S = 4;
 const PAUSE_BREAK_S = 0.85;
@@ -130,8 +135,10 @@ export function buildAiTranscriptBlocks(
   return blocks;
 }
 
-export function buildAiTranscriptHeader(): string {
-  return [
+export function buildAiTranscriptHeader(
+  durationConstraint?: AiClipDurationConstraint
+): string {
+  const lines = [
     "You are helping analyze a transcript for Rescript.",
     "The timestamps below are ORIGINAL media time in seconds.",
     "Transcript blocks include compact IDs like B0001 for reference.",
@@ -142,15 +149,22 @@ export function buildAiTranscriptHeader(): string {
     "- score and reason are optional",
     "- start/end must be original media time in seconds",
     "- return valid JSON only when asked for clips",
-  ].join("\n");
+  ];
+  if (durationConstraint) {
+    lines.push(
+      `- every clip duration must be between ${durationConstraint.min} and ${durationConstraint.max} seconds`
+    );
+  }
+  return lines.join("\n");
 }
 
 export function buildAiTranscriptExport(
   words: Word[],
-  speakers: SpeakerInfo[] = []
+  speakers: SpeakerInfo[] = [],
+  durationConstraint?: AiClipDurationConstraint
 ): string {
   const blocks = buildAiTranscriptBlocks(words, speakers);
-  const lines = [buildAiTranscriptHeader(), ""];
+  const lines = [buildAiTranscriptHeader(durationConstraint), ""];
   for (const block of blocks) {
     lines.push(blockHeader(block));
     lines.push(block.text);

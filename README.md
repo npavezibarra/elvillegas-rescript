@@ -16,6 +16,25 @@ audio file and it is transcribed locally with per-word timestamps and speaker
 labels. Delete words in the transcript and the corresponding clip is cut from
 the media. Export the final cut — without your file ever leaving your device.
 
+## Editing hierarchy and scope
+
+The editing model follows this hierarchy:
+
+```text
+VIDEO > CLIP > SEGMENT
+```
+
+- **VIDEO** is the complete source media.
+- **CLIP** is the editing boundary currently in focus. When editing a clip,
+  the editor must not expose or modify anything at the `VIDEO` level.
+- **SEGMENT** is an editable portion within the current clip.
+
+All timeline interactions must respect the boundaries of the current **CLIP**,
+not the duration or boundaries of the entire **VIDEO**. The timeline may
+continue beyond the last video segment into an optional area for additional
+elements, such as a closing JPG image. These elements extend the composition
+without changing the clip's editing scope.
+
 ## Download
 
 <div align="center">

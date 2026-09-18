@@ -6,6 +6,7 @@ import Image from "next/image";
 import {
   AudioLines,
   Film,
+  FolderOpen,
   Loader2,
   Music,
   Trash2,
@@ -20,12 +21,24 @@ import ModelSelector, {
 } from "./ModelSelector";
 import ImportTranscriptOption from "./ImportTranscriptOption";
 import AiClipsPanel from "./AiClipsPanel";
+import YouTubeImportControl from "./YouTubeImportControl";
+import { cancelTranscription } from "@/hooks/useTranscriber";
 import { MODEL_ORDER } from "@/lib/models";
 import { useCrossOriginIsolated } from "@/hooks/useCrossOriginIsolated";
 import { detectMediaKind, MEDIA_ACCEPT } from "@/lib/media";
 import { formatTime } from "@/lib/edits";
 import { listProjects, type ProjectMeta } from "@/lib/projects";
+import {
+  deleteLibraryFile,
+  fileFromLibraryRecord,
+  getLibraryFile,
+  listLibraryFiles,
+  putLibraryFile,
+  type LibraryFileMeta,
+  type LibraryFileSource,
+} from "@/lib/mediaLibrary";
 import { isElectron } from "@/lib/platform";
+import { resetFFmpeg } from "@/lib/ffmpeg";
 import { useEditorStore } from "@/lib/store";
 import type { SpeakerInfo, Word } from "@/lib/types";
 import { useI18n } from "./I18nProvider";
@@ -272,6 +285,95 @@ function ProjectCard({
   );
 }
 
+function LibraryFileCard({
+  item,
+  busy,
+  onTranscribe,
+  onNewProject,
+  onRemove,
+}: {
+  item: LibraryFileMeta;
+  busy: boolean;
+  onTranscribe: (id: string) => void;
+  onNewProject: (id: string) => void;
+  onRemove: (id: string) => void;
+}) {
+  const { locale, t } = useI18n();
+  const isSpanish = locale === "es";
+  const KindIcon = MEDIA_ICON[item.mediaKind];
+  const sizeMb = item.size / (1024 * 1024);
+
+  const hasTranscript = item.transcriptStatus === "ready";
+
+  return (
+    <article className="overflow-hidden rounded-[1.25rem] border border-zinc-200 bg-white/90 shadow-sm transition hover:shadow-md hover:shadow-black/5 dark:border-zinc-800 dark:bg-zinc-900/80">
+      <div className="flex w-full items-start gap-3 p-4 text-left">
+        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-200">
+          <KindIcon size={18} />
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-[15px] font-medium text-zinc-900 dark:text-zinc-100">
+            {item.name}
+          </p>
+          <p className="mt-1 text-[12px] text-zinc-500 dark:text-zinc-400">
+            {item.source === "youtube"
+              ? isSpanish
+                ? "YouTube"
+                : "YouTube"
+              : isSpanish
+                ? "Subido"
+                : "Uploaded"}
+            {" · "}
+            {sizeMb >= 10 ? Math.round(sizeMb) : sizeMb.toFixed(1)} MB
+            {" · "}
+            {formatRelativeTime(locale, item.updatedAt)}
+          </p>
+          <p className="mt-1 text-[12px] text-zinc-400 dark:text-zinc-500">
+            {hasTranscript
+              ? isSpanish
+                ? `${item.transcriptWordCount} palabras transcritas`
+                : `${item.transcriptWordCount} transcribed words`
+              : isSpanish
+                ? "Sin transcripción"
+                : "No transcript yet"}
+          </p>
+        </div>
+        {busy && <Loader2 size={14} className="mt-1 shrink-0 animate-spin text-zinc-400" />}
+      </div>
+      <div className="flex items-center justify-between border-t border-zinc-100 px-4 py-3 dark:border-zinc-800">
+        <span className="text-[11px] uppercase tracking-[0.2em] text-zinc-400 dark:text-zinc-500">
+          {item.mediaKind === "audio" ? t("export.audio") : t("export.video")}
+        </span>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => (hasTranscript ? onNewProject(item.id) : onTranscribe(item.id))}
+            className="inline-flex h-8 items-center justify-center rounded-full bg-zinc-900 px-3 text-[12px] font-semibold text-white transition hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-white"
+          >
+            {hasTranscript
+              ? isSpanish
+                ? "Nuevo proyecto"
+                : "New project"
+              : isSpanish
+                ? "Transcribir"
+                : "Transcribe"}
+          </button>
+          <button
+            type="button"
+            title={t("upload.removeRecent")}
+            disabled={busy}
+            onClick={() => onRemove(item.id)}
+            className="inline-flex h-8 w-8 items-center justify-center rounded-full text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-700 disabled:cursor-not-allowed disabled:opacity-40 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+          >
+            <Trash2 size={14} />
+          </button>
+        </div>
+      </div>
+    </article>
+  );
+}
+
 export default function ProjectsScreen({
   onFile,
 }: {
@@ -284,19 +386,67 @@ export default function ProjectsScreen({
   const inputId = useId();
   const [dragging, setDragging] = useState(false);
   const [projects, setProjects] = useState<ProjectMeta[]>([]);
+  const [libraryFiles, setLibraryFiles] = useState<LibraryFileMeta[]>([]);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [showLibrary, setShowLibrary] = useState(false);
+  const [processingElapsed, setProcessingElapsed] = useState(0);
   const isolation = useCrossOriginIsolated();
   const ready = isolation === "ready";
   const status = useEditorStore((s) => s.status);
   const progress = useEditorStore((s) => s.progress);
+  const error = useEditorStore((s) => s.error);
   const videoFile = useEditorStore((s) => s.videoFile);
+  const transcriptWordCount = useEditorStore((s) => s.words.length);
   const projectPhase = useEditorStore((s) => s.projectPhase);
   const source = useEditorStore((s) => s.source);
   const pendingTranscript = useEditorStore((s) => s.pendingTranscript);
+  const loadVideo = useEditorStore((s) => s.loadVideo);
+  const setError = useEditorStore((s) => s.setError);
   const openProject = useEditorStore((s) => s.openProject);
   const removeProject = useEditorStore((s) => s.removeProject);
   const { locale, t } = useI18n();
   const isSpanish = locale === "es";
+
+  useEffect(() => {
+    if (projectPhase !== "processing") return;
+    const startedAt = Date.now();
+    const updateElapsed = () =>
+      setProcessingElapsed(Math.floor((Date.now() - startedAt) / 1000));
+    const initialTimer = window.setTimeout(updateElapsed, 0);
+    const timer = window.setInterval(updateElapsed, 1000);
+    return () => {
+      window.clearTimeout(initialTimer);
+      window.clearInterval(timer);
+    };
+  }, [projectPhase, videoFile]);
+
+  useEffect(() => {
+    if (projectPhase !== "processing") return;
+    const watchdog = window.setTimeout(() => {
+      resetFFmpeg();
+      cancelTranscription();
+      setError(
+        isSpanish
+          ? "El proceso dejó de responder. El motor fue reiniciado; pulsa Reintentar."
+          : "Processing stopped responding. The media engine was reset; press Retry."
+      );
+    }, 2 * 60 * 1000);
+    return () => window.clearTimeout(watchdog);
+  }, [isSpanish, progress.message, progress.value, projectPhase, setError]);
+
+  const inferredProgressMessage =
+    progress.message ||
+    (status === "transcribing"
+      ? isSpanish
+        ? "Cargando modelo de voz…"
+        : "Loading speech model…"
+      : isSpanish
+        ? "Cargando motor multimedia…"
+        : "Loading media engine…");
+  const elapsedLabel =
+    processingElapsed < 60
+      ? `${processingElapsed}s`
+      : `${Math.floor(processingElapsed / 60)}m ${processingElapsed % 60}s`;
 
   const refreshProjects = useCallback(async () => {
     try {
@@ -306,6 +456,27 @@ export default function ProjectsScreen({
       setProjects([]);
     }
   }, []);
+
+  const refreshLibrary = useCallback(async () => {
+    try {
+      setLibraryFiles(await listLibraryFiles());
+    } catch (err) {
+      console.warn("Failed to list media library.", err);
+      setLibraryFiles([]);
+    }
+  }, []);
+
+  const rememberFile = useCallback(
+    async (file: File, source: LibraryFileSource) => {
+      try {
+        await putLibraryFile(file, source);
+        await refreshLibrary();
+      } catch (err) {
+        console.warn("Failed to add file to media library.", err);
+      }
+    },
+    [refreshLibrary]
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -322,6 +493,31 @@ export default function ProjectsScreen({
     };
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    void listLibraryFiles()
+      .then((rows) => {
+        if (!cancelled) setLibraryFiles(rows);
+      })
+      .catch((err) => {
+        console.warn("Failed to list media library.", err);
+        if (!cancelled) setLibraryFiles([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    const onLibraryUpdated = () => {
+      void refreshLibrary();
+    };
+    window.addEventListener("rescript-library-updated", onLibraryUpdated);
+    return () => {
+      window.removeEventListener("rescript-library-updated", onLibraryUpdated);
+    };
+  }, [refreshLibrary]);
+
   const handleFiles = useCallback(
     (files: FileList | null) => {
       if (!ready) return;
@@ -337,12 +533,22 @@ export default function ProjectsScreen({
           alert(t("editor.chooseTranscript"));
           return;
         }
+        void rememberFile(file, "upload");
         onFile(file, { words: pending.words, speakers: pending.speakers });
         return;
       }
+      void rememberFile(file, "upload");
       onFile(file);
     },
-    [onFile, ready, t]
+    [onFile, ready, rememberFile, t]
+  );
+
+  const handleImportedFile = useCallback(
+    (file: File, source: LibraryFileSource, options?: { words?: Word[]; speakers?: SpeakerInfo[] }) => {
+      void rememberFile(file, source);
+      onFile(file, options);
+    },
+    [onFile, rememberFile]
   );
 
   const handleOpen = useCallback(
@@ -378,6 +584,77 @@ export default function ProjectsScreen({
     },
     [removeProject, refreshProjects, t]
   );
+
+  const handleTranscribeLibraryFile = useCallback(
+    async (id: string) => {
+      if (!ready) return;
+      setBusyId(id);
+      try {
+        const record = await getLibraryFile(id);
+        if (!record) throw new Error(isSpanish ? "No encontramos ese archivo." : "We could not find that file.");
+        onFile(fileFromLibraryRecord(record));
+      } catch (err) {
+        console.error(err);
+        alert(err instanceof Error ? err.message : t("error.openProject"));
+        await refreshLibrary();
+      } finally {
+        setBusyId(null);
+      }
+    },
+    [isSpanish, onFile, ready, refreshLibrary, t]
+  );
+
+  const handleNewProjectFromLibraryFile = useCallback(
+    async (id: string) => {
+      if (!ready) return;
+      setBusyId(id);
+      try {
+        const record = await getLibraryFile(id);
+        if (!record) throw new Error(isSpanish ? "No encontramos ese archivo." : "We could not find that file.");
+        const words = record.words ?? [];
+        if (words.length === 0) {
+          onFile(fileFromLibraryRecord(record));
+          return;
+        }
+        onFile(fileFromLibraryRecord(record), {
+          words,
+          speakers: record.speakers ?? [],
+        });
+      } catch (err) {
+        console.error(err);
+        alert(err instanceof Error ? err.message : t("error.openProject"));
+        await refreshLibrary();
+      } finally {
+        setBusyId(null);
+      }
+    },
+    [isSpanish, onFile, ready, refreshLibrary, t]
+  );
+
+  const handleRemoveLibraryFile = useCallback(
+    async (id: string) => {
+      try {
+        await deleteLibraryFile(id);
+        await refreshLibrary();
+      } catch (err) {
+        console.error(err);
+        alert(isSpanish ? "No se pudo borrar el archivo." : "Could not remove the file.");
+      }
+    },
+    [isSpanish, refreshLibrary]
+  );
+
+  const handleCancelProcessing = useCallback(() => {
+    cancelTranscription();
+    resetFFmpeg();
+    setError(isSpanish ? "Transcripción cancelada." : "Transcription cancelled.");
+  }, [isSpanish, setError]);
+
+  const handleRetryProcessing = useCallback(() => {
+    if (!videoFile) return;
+    resetFFmpeg();
+    loadVideo(videoFile);
+  }, [loadVideo, videoFile]);
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain bg-[radial-gradient(circle_at_top,_rgba(255,255,255,0.9),_rgba(245,245,245,0.95)_36%,_rgba(240,240,240,1))] dark:bg-[radial-gradient(circle_at_top,_rgba(30,30,30,0.98),_rgba(10,10,10,1)_46%)]">
@@ -449,12 +726,17 @@ export default function ProjectsScreen({
                 {videoFile.name}
               </h2>
               <p className="mt-2 max-w-3xl text-sm leading-relaxed text-zinc-500 dark:text-zinc-400">
-                {status === "preparing" || status === "transcribing"
-                  ? progress.message
+                {projectPhase === "error"
+                  ? error ||
+                    (isSpanish
+                      ? "No se pudo procesar la transcripción."
+                      : "The transcript could not be processed.")
+                  : projectPhase === "processing"
+                  ? inferredProgressMessage
                   : projectPhase === "transcript_ready"
                     ? isSpanish
-                      ? "La transcripción terminó. Usa AI para copiar el prompt, pega la respuesta del LLM y después pulsa MAKE CLIPS."
-                      : "The transcript is ready. Use AI to copy the prompt, paste the LLM response, then press MAKE CLIPS."
+                      ? "La transcripción terminó. Ingresa min/max en AI, copia el prompt, pega la respuesta del LLM y pulsa MAKE CLIPS."
+                      : "The transcript is ready. Enter min/max in AI, copy the prompt, paste the LLM response, then press MAKE CLIPS."
                     : projectPhase === "clips_ready"
                       ? isSpanish
                         ? "Los clips ya están listos para revisar."
@@ -463,22 +745,77 @@ export default function ProjectsScreen({
                         ? "Abre un clip para entrar a la pantalla de edición."
                         : "Open a clip to enter the editing screen."}
               </p>
+              {projectPhase === "processing" && (
+                <div className="mt-4 max-w-xl">
+                  <div className="h-2 overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800">
+                    <div
+                      className={`h-full rounded-full bg-zinc-950 transition-all dark:bg-zinc-100 ${
+                        progress.value == null ? "w-1/3 animate-pulse" : ""
+                      }`}
+                      style={
+                        progress.value == null
+                          ? undefined
+                          : { width: `${Math.max(2, Math.min(100, progress.value * 100))}%` }
+                      }
+                    />
+                  </div>
+                  <div className="mt-2 flex items-center justify-between gap-3 text-xs text-zinc-500 dark:text-zinc-400">
+                    <span>
+                      {progress.value == null
+                        ? inferredProgressMessage
+                        : isSpanish
+                          ? "Avanzando"
+                          : "In progress"}
+                    </span>
+                    <span className="shrink-0 tabular-nums">
+                      {progress.value == null
+                        ? elapsedLabel
+                        : `${Math.round(progress.value * 100)}%`}
+                    </span>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
-              {status === "ready" && (
+              {status === "ready" && transcriptWordCount > 0 && (
                 <>
                   <AiClipsPanel triggerLabel={isSpanish ? "AI" : "AI"} />
                   <div className="rounded-full border border-zinc-200 bg-zinc-50 px-3 py-2 text-[12px] font-medium text-zinc-500 dark:border-zinc-800 dark:bg-zinc-950/70 dark:text-zinc-400">
-                    {isSpanish ? "Pega la respuesta del LLM y pulsa MAKE CLIPS" : "Paste the LLM response and press MAKE CLIPS"}
+                    {isSpanish
+                      ? "Ingresa min/max, copia el prompt y pulsa MAKE CLIPS"
+                      : "Enter min/max, copy the prompt, then press MAKE CLIPS"}
                   </div>
                 </>
               )}
-              {(status === "preparing" || status === "transcribing") && (
-                <div className="flex items-center gap-2 rounded-full border border-zinc-200 bg-zinc-50 px-3 py-2 text-[12px] font-medium text-zinc-500 dark:border-zinc-800 dark:bg-zinc-950/70 dark:text-zinc-400">
-                  <Loader2 size={14} className="animate-spin" />
-                  <span>{isSpanish ? "Procesando" : "Processing"}</span>
-                </div>
+              {projectPhase === "processing" && (
+                <>
+                  <div className="flex items-center gap-2 rounded-full border border-zinc-200 bg-zinc-50 px-3 py-2 text-[12px] font-medium text-zinc-500 dark:border-zinc-800 dark:bg-zinc-950/70 dark:text-zinc-400">
+                    <Loader2 size={14} className="animate-spin" />
+                    <span>
+                      {isSpanish ? "Procesando" : "Processing"} ·{" "}
+                      {progress.value == null
+                        ? elapsedLabel
+                        : `${Math.round(progress.value * 100)}%`}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleCancelProcessing}
+                    className="rounded-full border border-zinc-200 bg-white px-3 py-2 text-[12px] font-semibold text-zinc-600 transition hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-300 dark:hover:bg-zinc-900"
+                  >
+                    {isSpanish ? "Cancelar" : "Cancel"}
+                  </button>
+                </>
+              )}
+              {projectPhase === "error" && (
+                <button
+                  type="button"
+                  onClick={handleRetryProcessing}
+                  className="rounded-full bg-zinc-900 px-3 py-2 text-[12px] font-semibold text-white transition hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-white"
+                >
+                  {isSpanish ? "Reintentar" : "Retry"}
+                </button>
               )}
               {projectPhase === "clips_ready" && (
                 <div className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-2 text-[12px] font-medium text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-300">
@@ -489,8 +826,12 @@ export default function ProjectsScreen({
           </section>
         )}
 
-        <section>
-          <div className="grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+        <section className="space-y-4">
+          <h2 className="text-2xl font-semibold tracking-tight text-zinc-950 dark:text-zinc-50">
+            {isSpanish ? "Iniciar proyecto" : "Start project"}
+          </h2>
+          <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
+              {isElectron && <YouTubeImportControl ready={ready} onFile={(file, options) => handleImportedFile(file, "youtube", options)} />}
             <ProjectUploadCard
               ready={ready}
               dragging={dragging}
@@ -501,9 +842,62 @@ export default function ProjectsScreen({
               inputRef={inputRef}
               onDraggingChange={setDragging}
             />
+          </div>
+        </section>
 
+        <section className="space-y-4">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <h2 className="text-2xl font-semibold tracking-tight text-zinc-950 dark:text-zinc-50">
+              Our Files
+            </h2>
+            <button
+              type="button"
+              onClick={() => setShowLibrary((value) => !value)}
+              className="inline-flex h-10 items-center justify-center gap-2 rounded-full border border-zinc-200 bg-white/85 px-4 text-[13px] font-semibold text-zinc-700 shadow-sm transition hover:bg-white dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-200 dark:hover:bg-zinc-900"
+            >
+              <FolderOpen size={15} />
+              {showLibrary
+                ? isSpanish
+                  ? "Ocultar Our Files"
+                  : "Hide Our Files"
+                : isSpanish
+                  ? `Ver Our Files (${libraryFiles.length})`
+                  : `View Our Files (${libraryFiles.length})`}
+            </button>
+          </div>
+          {showLibrary && (
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+              {libraryFiles.length === 0 ? (
+                <div className="flex min-h-32 items-center justify-center rounded-[1.25rem] border border-dashed border-zinc-200 bg-white/70 p-6 text-center dark:border-zinc-800 dark:bg-zinc-900/50 md:col-span-2">
+                  <p className="max-w-sm text-sm leading-relaxed text-zinc-500 dark:text-zinc-400">
+                    {isSpanish
+                      ? "Los videos que bajes de YouTube o subas desde tu computador aparecerán aquí para reutilizarlos."
+                      : "Videos imported from YouTube or uploaded from your computer will appear here for reuse."}
+                  </p>
+                </div>
+              ) : (
+                libraryFiles.map((item) => (
+                  <LibraryFileCard
+                    key={item.id}
+                    item={item}
+                    busy={busyId === item.id}
+                    onTranscribe={handleTranscribeLibraryFile}
+                    onNewProject={handleNewProjectFromLibraryFile}
+                    onRemove={handleRemoveLibraryFile}
+                  />
+                ))
+              )}
+            </div>
+          )}
+        </section>
+
+        <section className="space-y-4">
+          <h2 className="text-2xl font-semibold tracking-tight text-zinc-950 dark:text-zinc-50">
+            {isSpanish ? "Mis proyectos" : "My projects"}
+          </h2>
+          <div className="grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
             {projects.length === 0 ? (
-              <div className="flex min-h-[18rem] items-center justify-center rounded-[1.75rem] border border-dashed border-zinc-200 bg-white/70 p-6 text-center dark:border-zinc-800 dark:bg-zinc-900/50">
+              <div className="flex min-h-[18rem] items-center justify-center rounded-[1.75rem] border border-dashed border-zinc-200 bg-white/70 p-6 text-center dark:border-zinc-800 dark:bg-zinc-900/50 md:col-span-2">
                 <div>
                   <p className="text-lg font-medium text-zinc-900 dark:text-zinc-100">
                     {isSpanish ? "Aún no hay proyectos" : "No projects yet"}

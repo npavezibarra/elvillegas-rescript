@@ -42,6 +42,15 @@ const words: Word[] = [
 }
 
 {
+  const exported = buildAiTranscriptExport(words, [], { min: 30, max: 120 });
+  assert(
+    exported.includes("between 30 and 120 seconds"),
+    "duration constraint missing from prompt"
+  );
+  console.log("AI duration prompt: ok");
+}
+
+{
   const json = `[
     {
       "title": "The nuclear option",

@@ -1,11 +1,11 @@
 "use client";
 
-import { useCallback } from "react";
-import { ArrowLeft, FileVideo, Sparkles } from "lucide-react";
+import { useCallback, useState } from "react";
+import { ArrowLeft, ClipboardPaste, FileJson2, FileVideo, Sparkles, X } from "lucide-react";
 import { useEditorStore } from "@/lib/store";
 import { formatTime } from "@/lib/edits";
 import { useI18n } from "./I18nProvider";
-import { type ClipSuggestion } from "@/lib/aiClips";
+import { parseClipSuggestions, type ClipSuggestion } from "@/lib/aiClips";
 
 function scoreLabel(score?: number): string {
   return score == null ? "—" : String(Math.round(score));
@@ -86,12 +86,57 @@ export default function ClipsScreen() {
   const { locale } = useI18n();
   const suggestions = useEditorStore((s) => s.aiClipSuggestions);
   const videoFile = useEditorStore((s) => s.videoFile);
+  const duration = useEditorStore((s) => s.duration);
+  const setSuggestions = useEditorStore((s) => s.setAiClipSuggestions);
   const setSelectedWords = useEditorStore((s) => s.setSelectedWords);
   const setAiClipPreviewRange = useEditorStore((s) => s.setAiClipPreviewRange);
+  const setActiveClipRange = useEditorStore((s) => s.setActiveClipRange);
   const setWorkspaceScreen = useEditorStore((s) => s.setWorkspaceScreen);
   const setSelectedClipIndex = useEditorStore((s) => s.setSelectedClipIndex);
   const setSelectedCutIndex = useEditorStore((s) => s.setSelectedCutIndex);
   const isSpanish = locale === "es";
+  const [importOpen, setImportOpen] = useState(false);
+  const [importValue, setImportValue] = useState("");
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importMessage, setImportMessage] = useState<string | null>(null);
+
+  const importAdditionalClips = useCallback(() => {
+    setImportError(null);
+    setImportMessage(null);
+    try {
+      const parsed = parseClipSuggestions(importValue, duration);
+      const additions = parsed.filter(
+        (candidate) =>
+          !suggestions.some(
+            (existing) =>
+              Math.abs(existing.start - candidate.start) < 0.01 &&
+              Math.abs(existing.end - candidate.end) < 0.01
+          )
+      );
+      if (additions.length === 0) {
+        throw new Error(
+          isSpanish
+            ? "No hay clips nuevos para agregar."
+            : "There are no new clips to add."
+        );
+      }
+      setSuggestions([...suggestions, ...additions]);
+      setImportValue("");
+      setImportMessage(
+        isSpanish
+          ? `Se agregaron ${additions.length} clips nuevos.`
+          : `${additions.length} new clips added.`
+      );
+    } catch (err) {
+      setImportError(
+        err instanceof Error
+          ? err.message
+          : isSpanish
+            ? "No se pudieron importar los clips."
+            : "Could not import clips."
+      );
+    }
+  }, [duration, importValue, isSpanish, setSuggestions, suggestions]);
 
   const openClip = useCallback(
     (clip: ClipSuggestion) => {
@@ -99,12 +144,14 @@ export default function ClipsScreen() {
       // editing view of that original-media range, even if other cuts exist.
       setSelectedClipIndex(null);
       setSelectedCutIndex(null);
+      setActiveClipRange({ start: clip.start, end: clip.end });
       setAiClipPreviewRange({ start: clip.start, end: clip.end });
       setSelectedWords([]);
       setWorkspaceScreen("editor");
     },
     [
       setAiClipPreviewRange,
+      setActiveClipRange,
       setSelectedClipIndex,
       setSelectedCutIndex,
       setSelectedWords,
@@ -153,8 +200,66 @@ export default function ClipsScreen() {
                 ? `${suggestions.length} clips listos`
                 : `${suggestions.length} clips ready`}
             </div>
+            <button
+              type="button"
+              onClick={() => {
+                setImportOpen((open) => !open);
+                setImportError(null);
+                setImportMessage(null);
+              }}
+              className="inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-white/80 px-4 py-2 text-[13px] font-medium text-zinc-700 shadow-sm transition hover:border-zinc-400 hover:bg-white dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-200 dark:hover:border-zinc-600 dark:hover:bg-zinc-900"
+            >
+              <ClipboardPaste size={14} />
+              {isSpanish ? "Importar más clips" : "Import more clips"}
+            </button>
           </div>
         </section>
+
+        {importOpen && (
+          <section className="rounded-[1.5rem] border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-900/80">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="flex items-center gap-2 text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                  <FileJson2 size={16} />
+                  {isSpanish ? "Agregar resultados del LLM" : "Add LLM results"}
+                </p>
+                <p className="mt-1 text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
+                  {isSpanish
+                    ? "Pega otro JSON. Los clips existentes se conservarán y los duplicados se ignorarán."
+                    : "Paste another JSON result. Existing clips stay and duplicates are ignored."}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setImportOpen(false)}
+                aria-label={isSpanish ? "Cerrar importador" : "Close importer"}
+                className="rounded-md p-1 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+              >
+                <X size={15} />
+              </button>
+            </div>
+            <textarea
+              value={importValue}
+              onChange={(event) => setImportValue(event.target.value)}
+              placeholder='[{"title":"...","start":0,"end":60,"score":90,"reason":"..."}]'
+              className="mt-3 h-32 w-full resize-y rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-[12px] text-zinc-800 outline-none transition focus:border-zinc-400 dark:border-zinc-700 dark:bg-zinc-950/50 dark:text-zinc-100 dark:focus:border-zinc-500"
+            />
+            {(importError || importMessage) && (
+              <p className={`mt-2 text-xs ${importError ? "text-red-600 dark:text-red-400" : "text-emerald-600 dark:text-emerald-400"}`}>
+                {importError ?? importMessage}
+              </p>
+            )}
+            <button
+              type="button"
+              onClick={importAdditionalClips}
+              disabled={!importValue.trim()}
+              className="mt-3 inline-flex items-center gap-2 rounded-lg bg-zinc-900 px-3 py-2 text-xs font-medium text-white transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-white"
+            >
+              <ClipboardPaste size={13} />
+              {isSpanish ? "Agregar clips" : "Add clips"}
+            </button>
+          </section>
+        )}
 
         {suggestions.length === 0 ? (
           <section className="flex min-h-[22rem] items-center justify-center rounded-[1.75rem] border border-dashed border-zinc-200 bg-white/70 p-6 text-center dark:border-zinc-800 dark:bg-zinc-900/50">

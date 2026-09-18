@@ -15,11 +15,42 @@ import {
   buildAiTranscriptExport,
   parseClipSuggestions,
   reorderClipSuggestions,
+  type AiClipDurationConstraint,
 } from "@/lib/aiClips";
 import { formatTime } from "@/lib/edits";
 
 function scoreLabel(score?: number): string {
   return score == null ? "—" : String(Math.round(score));
+}
+
+function parseDurationConstraint(
+  minValue: string,
+  maxValue: string
+): { constraint: AiClipDurationConstraint | null; error: string | null } {
+  const minText = minValue.trim();
+  const maxText = maxValue.trim();
+  if (minText === "" || maxText === "") {
+    return {
+      constraint: null,
+      error: "Enter both minimum and maximum clip lengths.",
+    };
+  }
+
+  const min = Number(minText);
+  const max = Number(maxText);
+  if (!Number.isFinite(min) || min < 0) {
+    return { constraint: null, error: "Minimum clip length must be 0 or greater." };
+  }
+  if (!Number.isFinite(max) || max < 0) {
+    return { constraint: null, error: "Maximum clip length must be 0 or greater." };
+  }
+  if (max < min) {
+    return {
+      constraint: null,
+      error: "Maximum clip length must be greater than minimum.",
+    };
+  }
+  return { constraint: { min, max }, error: null };
 }
 
 export default function AiClipsPanel({
@@ -48,7 +79,11 @@ export default function AiClipsPanel({
   const [dropIndex, setDropIndex] = useState<number | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
 
-  const canCopy = words.length > 0;
+  const durationConstraint = useMemo(
+    () => parseDurationConstraint(durationRange.min, durationRange.max),
+    [durationRange.min, durationRange.max]
+  );
+  const canCopy = words.length > 0 && durationConstraint.constraint !== null;
   const activePreview = useMemo(
     () =>
       previewRange
@@ -66,7 +101,11 @@ export default function AiClipsPanel({
     setCopyError(null);
     setCopyBusy(true);
     try {
-      const text = buildAiTranscriptExport(words, speakers);
+      const text = buildAiTranscriptExport(
+        words,
+        speakers,
+        durationConstraint.constraint ?? undefined
+      );
       await navigator.clipboard.writeText(text);
     } catch (err) {
       setCopyError(
@@ -75,28 +114,24 @@ export default function AiClipsPanel({
     } finally {
       setCopyBusy(false);
     }
-  }, [canCopy, words, speakers]);
+  }, [canCopy, words, speakers, durationConstraint.constraint]);
 
   const handleImport = useCallback(() => {
     setImportError(null);
     setCreateError(null);
     try {
       const parsed = parseClipSuggestions(pasteValue, duration);
-      const min = durationRange.min.trim() === "" ? null : Number(durationRange.min);
-      const max = durationRange.max.trim() === "" ? null : Number(durationRange.max);
-      if (min !== null && (!Number.isFinite(min) || min < 0)) {
-        throw new Error("Minimum clip length must be 0 or greater.");
-      }
-      if (max !== null && (!Number.isFinite(max) || max < 0)) {
-        throw new Error("Maximum clip length must be 0 or greater.");
-      }
-      if (min !== null && max !== null && max < min) {
-        throw new Error("Maximum clip length must be greater than minimum.");
+      const { constraint, error } = parseDurationConstraint(
+        durationRange.min,
+        durationRange.max
+      );
+      if (!constraint) {
+        throw new Error(error ?? "Enter a valid clip duration range.");
       }
       const filtered = parsed.filter((clip) => {
         const clipDuration = clip.end - clip.start;
-        if (min !== null && clipDuration < min - 1e-3) return false;
-        if (max !== null && clipDuration > max + 1e-3) return false;
+        if (clipDuration < constraint.min - 1e-3) return false;
+        if (clipDuration > constraint.max + 1e-3) return false;
         return true;
       });
       if (filtered.length === 0) {
@@ -181,6 +216,11 @@ export default function AiClipsPanel({
             {copyError && (
               <p className="mt-2 text-[11px] text-red-600 dark:text-red-400">
                 {copyError}
+              </p>
+            )}
+            {!canCopy && durationConstraint.error && (
+              <p className="mt-2 text-[11px] text-zinc-400 dark:text-zinc-500">
+                {durationConstraint.error}
               </p>
             )}
             {createError && (

@@ -122,6 +122,8 @@ export interface TextLayer extends LayerBase {
 export interface ImageLayer extends LayerBase {
   type: "image";
   src: string;
+  /** Image belongs to the composition after the source video ends. */
+  postRoll?: boolean;
   /** Visible source area; absent on older projects means the whole image. */
   crop?: LayerTransform;
   /** Physical width/height ratio of the cropped source area. */

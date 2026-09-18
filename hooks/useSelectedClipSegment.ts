@@ -11,10 +11,23 @@ export function useSelectedClipSegment(): ClipSegment | null {
   const duration = useEditorStore((s) => s.duration);
   const selectedClipIndex = useEditorStore((s) => s.selectedClipIndex);
   const aiClipPreviewRange = useEditorStore((s) => s.aiClipPreviewRange);
+  const activeClipRange = useEditorStore((s) => s.activeClipRange);
   const cuts = useCutRanges();
 
   return useMemo(
     () => {
+      // An imported AI proposal is the active editing scope. It must take
+      // precedence over the underlying full-video keep range when a timeline
+      // interaction happens inside the proposal.
+      const scope = activeClipRange ?? aiClipPreviewRange;
+      if (scope) {
+        return {
+          id: `active-${scope.start.toFixed(4)}-${scope.end.toFixed(4)}`,
+          start: scope.start,
+          end: scope.end,
+          index: -1,
+        };
+      }
       const selected = getSelectedClipSegment(
         cuts,
         duration,
@@ -23,18 +36,11 @@ export function useSelectedClipSegment(): ClipSegment | null {
       );
       if (selected) return selected;
 
-      // An AI suggestion is an editable clip even before the user creates any
-      // permanent timeline boundaries for it.
-      if (!aiClipPreviewRange) return null;
-      return {
-        id: `ai-${aiClipPreviewRange.start.toFixed(4)}-${aiClipPreviewRange.end.toFixed(4)}`,
-        start: aiClipPreviewRange.start,
-        end: aiClipPreviewRange.end,
-        index: -1,
-      };
+      return null;
     },
     [
       aiClipPreviewRange,
+      activeClipRange,
       cuts,
       duration,
       sceneBoundaries,

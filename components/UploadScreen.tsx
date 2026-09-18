@@ -10,6 +10,8 @@ import {
   Music,
   Scissors,
   ShieldAlert,
+  Square,
+  SquarePlay,
   Trash2,
   Type,
 } from "lucide-react";
@@ -68,6 +70,15 @@ const CARDS = [
     rest: "rotate-[11deg] translate-x-5 group-hover:rotate-[18deg] group-hover:translate-x-10 group-hover:-translate-y-1.5",
   },
 ] as const;
+
+function isImportableVideoUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
 
 function MediaCards({ dragging }: { dragging: boolean }) {
   return (
@@ -167,7 +178,16 @@ export default function UploadScreen({
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const inputId = useId();
+  const youtubeImportId = useId();
   const [dragging, setDragging] = useState(false);
+  const [youtubeUrl, setYoutubeUrl] = useState("");
+  const [youtubeBusy, setYoutubeBusy] = useState(false);
+  const [youtubeProgress, setYoutubeProgress] = useState<{
+    id: string;
+    status: "starting" | "metadata" | "downloading" | "processing";
+    percent: number | null;
+    detail?: string;
+  } | null>(null);
   const [projects, setProjects] = useState<ProjectMeta[]>([]);
   const [busyId, setBusyId] = useState<string | null>(null);
   // The pipeline needs SharedArrayBuffer, so don't accept a file until the page
@@ -205,6 +225,14 @@ export default function UploadScreen({
     };
   }, []);
 
+  useEffect(() => {
+    if (!window.rescriptDesktop?.onYouTubeImportProgress) return;
+    return window.rescriptDesktop.onYouTubeImportProgress((progress) => {
+      if (progress.id !== youtubeImportId) return;
+      setYoutubeProgress(progress);
+    });
+  }, [youtubeImportId]);
+
   const handleFiles = useCallback(
     (files: FileList | null) => {
       if (!ready) return;
@@ -227,6 +255,69 @@ export default function UploadScreen({
     },
     [onFile, ready, t]
   );
+
+  const handleYouTubeImport = useCallback(async () => {
+    if (!ready || youtubeBusy) return;
+    const url = youtubeUrl.trim();
+    if (!url) return;
+    if (!isImportableVideoUrl(url)) {
+      alert(t("youtube.invalidUrl"));
+      return;
+    }
+    if (!window.rescriptDesktop?.importYouTubeVideo) {
+      alert(t("youtube.desktopOnly"));
+      return;
+    }
+
+    setYoutubeBusy(true);
+    setYoutubeProgress({
+      id: youtubeImportId,
+      status: "starting",
+      percent: null,
+      detail: t("youtube.starting"),
+    });
+    try {
+      const downloaded = await window.rescriptDesktop.importYouTubeVideo({
+        id: youtubeImportId,
+        url,
+      });
+      const data =
+        downloaded.data instanceof ArrayBuffer
+          ? downloaded.data
+          : new Uint8Array(downloaded.data).buffer;
+      const file = new File([data], downloaded.name, { type: downloaded.type });
+      if (!detectMediaKind(file)) {
+        alert(t("editor.chooseMedia"));
+        return;
+      }
+
+      const { source, pendingTranscript: pending } = useEditorStore.getState();
+      if (source === "import") {
+        if (!pending) {
+          alert(t("editor.chooseTranscript"));
+          return;
+        }
+        onFile(file, { words: pending.words, speakers: pending.speakers });
+        return;
+      }
+      onFile(file);
+    } catch (err) {
+      console.error(err);
+      alert(
+        err instanceof Error
+          ? localizeRuntimeMessage(err.message, t)
+          : t("youtube.failed")
+      );
+    } finally {
+      setYoutubeBusy(false);
+      setYoutubeProgress(null);
+    }
+  }, [onFile, ready, t, youtubeBusy, youtubeImportId, youtubeUrl]);
+
+  const handleCancelYouTubeImport = useCallback(() => {
+    if (!youtubeBusy) return;
+    void window.rescriptDesktop?.cancelYouTubeImport?.(youtubeImportId);
+  }, [youtubeBusy, youtubeImportId]);
 
   const handleOpen = useCallback(
     async (id: string) => {
@@ -305,6 +396,83 @@ export default function UploadScreen({
             input.click(). display:none inputs + .click() fail in some Chromium
             setups (DnD still works), which matches "browse does nothing".
           */}
+          {isElectron && (
+            <form
+              className="mb-4 rounded-2xl border border-zinc-200 bg-white/80 p-3 shadow-sm shadow-zinc-200/50 dark:border-zinc-800 dark:bg-zinc-900/60 dark:shadow-black/20"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void handleYouTubeImport();
+              }}
+            >
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                <label
+                  htmlFor="youtube-url"
+                  className="flex shrink-0 items-center gap-2 text-[13px] font-semibold text-zinc-700 dark:text-zinc-200"
+                >
+                  <SquarePlay size={16} className="text-red-600" />
+                  {t("youtube.url")}
+                </label>
+                <input
+                  id="youtube-url"
+                  type="url"
+                  inputMode="url"
+                  value={youtubeUrl}
+                  disabled={!ready || youtubeBusy}
+                  onChange={(e) => setYoutubeUrl(e.target.value)}
+                  placeholder={t("youtube.placeholder")}
+                  className="min-w-0 flex-1 rounded-xl border border-zinc-200 bg-white px-3 py-2 text-[13px] text-zinc-900 outline-none transition placeholder:text-zinc-400 focus:border-zinc-400 focus:ring-2 focus:ring-zinc-200 disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:focus:border-zinc-500 dark:focus:ring-zinc-800"
+                />
+                <button
+                  type="submit"
+                  disabled={!ready || youtubeBusy || youtubeUrl.trim().length === 0}
+                  className="inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-xl bg-zinc-950 px-4 text-[13px] font-semibold text-white transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-300 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-white dark:disabled:bg-zinc-700 dark:disabled:text-zinc-400"
+                >
+                  {youtubeBusy && <Loader2 size={15} className="animate-spin" />}
+                  {youtubeBusy ? t("youtube.importing") : t("youtube.import")}
+                </button>
+                {youtubeBusy && (
+                  <button
+                    type="button"
+                    onClick={handleCancelYouTubeImport}
+                    className="inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-xl border border-zinc-200 bg-white px-3 text-[13px] font-semibold text-zinc-700 transition hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-200 dark:hover:bg-zinc-900"
+                  >
+                    <Square size={13} />
+                    {t("youtube.cancel")}
+                  </button>
+                )}
+              </div>
+              {youtubeBusy ? (
+                <div className="mt-3">
+                  <div className="h-1.5 overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800">
+                    <div
+                      className={`h-full rounded-full bg-zinc-950 transition-all dark:bg-zinc-100 ${youtubeProgress?.percent == null ? "w-1/3 animate-pulse" : ""}`}
+                      style={
+                        youtubeProgress?.percent == null
+                          ? undefined
+                          : { width: `${youtubeProgress.percent}%` }
+                      }
+                    />
+                  </div>
+                  <div className="mt-2 flex items-center justify-between gap-3 text-xs text-zinc-500 dark:text-zinc-400">
+                    <span>
+                      {youtubeProgress?.detail
+                        ? localizeRuntimeMessage(youtubeProgress.detail, t)
+                        : t("youtube.importingVideo")}
+                    </span>
+                    <span className="shrink-0 tabular-nums">
+                      {youtubeProgress?.percent == null
+                        ? ""
+                        : `${Math.round(youtubeProgress.percent)}%`}
+                    </span>
+                  </div>
+                </div>
+              ) : (
+                <p className="mt-2 text-xs text-zinc-400 dark:text-zinc-500">
+                  {t("youtube.help")}
+                </p>
+              )}
+            </form>
+          )}
           <label
             htmlFor={inputId}
             aria-disabled={!ready}
