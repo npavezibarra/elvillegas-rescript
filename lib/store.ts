@@ -1268,6 +1268,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         ...(selectedClipIndex != null ? { selectedCutIndex: null } : {}),
       });
       if (selectedClipIndex == null) return next;
+      if (s.activeClipRange) return next;
 
       const cuts = getCutRanges(s.words, s.duration, s.manualCuts);
       const clip = getSelectedClipSegment(

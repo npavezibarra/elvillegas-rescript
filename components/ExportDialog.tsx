@@ -132,12 +132,15 @@ export default function ExportDialog() {
 
   const cuts = useCutRanges();
   const selectedClip = useSelectedClipSegment();
+  const activeClipRange = useEditorStore((s) => s.activeClipRange);
   const exportScope = useMemo(
     () =>
-      selectedClip
+      activeClipRange
+        ? { start: activeClipRange.start, end: activeClipRange.end }
+        : selectedClip
         ? { start: selectedClip.start, end: selectedClip.end }
         : { start: 0, end: duration },
-    [duration, selectedClip]
+    [activeClipRange, duration, selectedClip]
   );
   const keeps = useMemo(
     () =>

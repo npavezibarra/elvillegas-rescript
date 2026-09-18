@@ -73,7 +73,7 @@ export function serializeCaptionAss(
     "[V4+ Styles]",
     "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
     `Style: Caption,${fontName},${fontSize},${assColor(textStyle?.color ?? "#ffffff")},${assColor(textStyle?.color ?? "#ffffff")},&H00000000,&H0D000000,${textStyle && textStyle.fontWeight < 700 ? 0 : -1},0,0,0,100,100,${tracking},0,1,0,${textStyle?.dropShadow === false ? 0 : 2},2,${marginH},${marginH},${marginV},1`,
-    `Style: Active,${fontName},${fontSize},${assColor(ACTIVE_CAPTION_TEXT)},${assColor(ACTIVE_CAPTION_TEXT)},${assColor(ACTIVE_CAPTION_BACKGROUND)},&HD14DD3FC,${textStyle && textStyle.fontWeight < 700 ? 0 : -1},0,0,0,103,103,${tracking},0,3,${activePadding},${textStyle?.dropShadow === false ? 0 : 2},2,${marginH},${marginH},${marginV},1`,
+    `Style: Active,${fontName},${fontSize},${assColor(ACTIVE_CAPTION_TEXT)},${assColor(ACTIVE_CAPTION_TEXT)},${assColor(ACTIVE_CAPTION_BACKGROUND)},&HD14DD3FC,${textStyle && textStyle.fontWeight < 700 ? 0 : -1},0,0,0,103,103,${tracking},0,3,${activePadding},0,2,${marginH},${marginH},${marginV},1`,
     "",
     "[Events]",
     "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",

@@ -255,15 +255,17 @@ export default function TranscriptPanel() {
   const selectedWordIds = useEditorStore((s) => s.selectedWordIds);
   const playing = useEditorStore((s) => s.playing);
   const activeWordId = useEditorStore((s) => findActiveWordId(s.words, s.currentTime));
+  const activeClipRange = useEditorStore((s) => s.activeClipRange);
 
   const selectedClipSegment = useSelectedClipSegment();
+  const transcriptScope = activeClipRange ?? selectedClipSegment;
   const cuts = useCutRanges();
   const transcriptWords = useMemo(() => {
-    if (!selectedClipSegment) return words;
+    if (!transcriptScope) return words;
     return words.filter(
-      (w) => w.end > selectedClipSegment.start && w.start < selectedClipSegment.end
+      (w) => w.end > transcriptScope.start && w.start < transcriptScope.end
     );
-  }, [selectedClipSegment, words]);
+  }, [transcriptScope, words]);
   const cutOutIds = useMemo(() => {
     const ids = new Set<number>();
     for (const w of transcriptWords) {
@@ -536,9 +538,9 @@ export default function TranscriptPanel() {
           {t("transcript.header")}
         </span>
         <div className="ml-auto flex items-center gap-2">
-          {selectedClipSegment && (
+          {transcriptScope && (
             <span className="rounded-md bg-indigo-50 px-2 py-0.5 text-[9px] font-medium text-indigo-700 dark:bg-indigo-950/50 dark:text-indigo-300">
-              Clip {formatTime(selectedClipSegment.start)} - {formatTime(selectedClipSegment.end)}
+              Clip {formatTime(transcriptScope.start)} - {formatTime(transcriptScope.end)}
             </span>
           )}
           {status === "ready" && <AiClipsPanel />}
@@ -809,7 +811,7 @@ export default function TranscriptPanel() {
         <TranscriptCorrectionDialog
           words={words}
           selectedIds={selectedWordIds}
-          clipRange={selectedClipSegment}
+          clipRange={transcriptScope}
           onApply={applyTranscriptCorrections}
           onClose={() => setAiCorrectionOpen(false)}
         />

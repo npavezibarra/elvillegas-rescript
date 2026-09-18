@@ -32,6 +32,7 @@ export default function MediaPreview() {
   const setPlaying = useEditorStore((s) => s.setPlaying);
   const setCurrentTime = useEditorStore((s) => s.setCurrentTime);
   const aiClipPreviewRange = useEditorStore((s) => s.aiClipPreviewRange);
+  const activeClipRange = useEditorStore((s) => s.activeClipRange);
   const exportPreviewAspectRatio = useEditorStore(
     (s) => s.exportPreviewAspectRatio
   );
@@ -85,7 +86,8 @@ export default function MediaPreview() {
   const toolbarRef = useRef<HTMLDivElement | null>(null);
   const cuts = useCutRanges();
   const selectedClipSegment = useSelectedClipSegment();
-  const activePlaybackRange = selectedClipSegment ?? aiClipPreviewRange;
+  const activePlaybackRange =
+    activeClipRange ?? aiClipPreviewRange ?? selectedClipSegment;
   const captionWords = useMemo(
     () => getPreviewCaptionWords(words, cuts, activePlaybackRange),
     [activePlaybackRange, cuts, words]
@@ -136,15 +138,15 @@ export default function MediaPreview() {
 
   useEffect(() => {
     const media = mediaRef.current;
-    if (!media || !selectedClipSegment) return;
+    if (!media || !activePlaybackRange) return;
     if (
-      media.currentTime < selectedClipSegment.start ||
-      media.currentTime > selectedClipSegment.end
+      media.currentTime < activePlaybackRange.start ||
+      media.currentTime > activePlaybackRange.end
     ) {
-      media.currentTime = selectedClipSegment.start;
-      setCurrentTime(selectedClipSegment.start);
+      media.currentTime = activePlaybackRange.start;
+      setCurrentTime(activePlaybackRange.start);
     }
-  }, [selectedClipSegment, setCurrentTime]);
+  }, [activePlaybackRange, setCurrentTime]);
 
   useEffect(() => {
     if (!ratioMenuOpen && !layersMenuOpen && !mediaMenuOpen) return;

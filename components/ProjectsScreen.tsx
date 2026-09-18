@@ -11,6 +11,8 @@ import {
   Music,
   Trash2,
   Plus,
+  Upload,
+  X,
 } from "lucide-react";
 import logo from "@/assets/logo.png";
 import SettingsMenu from "./SettingsMenu";
@@ -212,6 +214,131 @@ function ProjectUploadCard({
   );
 }
 
+function GetVideoOverlay({
+  open,
+  mode,
+  ready,
+  dragging,
+  source,
+  pendingTranscript,
+  inputId,
+  inputRef,
+  onClose,
+  onModeChange,
+  onFiles,
+  onDraggingChange,
+  onImportedFile,
+}: {
+  open: boolean;
+  mode: "youtube" | "upload";
+  ready: boolean;
+  dragging: boolean;
+  source: string;
+  pendingTranscript: { name: string } | null;
+  inputId: string;
+  inputRef: RefObject<HTMLInputElement | null>;
+  onClose: () => void;
+  onModeChange: (mode: "youtube" | "upload") => void;
+  onFiles: (files: FileList | null) => void;
+  onDraggingChange: (dragging: boolean) => void;
+  onImportedFile: (
+    file: File,
+    options?: { words?: Word[]; speakers?: SpeakerInfo[] }
+  ) => void;
+}) {
+  const { locale } = useI18n();
+  const isSpanish = locale === "es";
+
+  useEffect(() => {
+    if (!open) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose, open]);
+
+  if (!open) return null;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center bg-zinc-950/35 px-4 py-6 backdrop-blur-sm sm:items-center"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="get-video-title"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div className="w-full max-w-2xl overflow-hidden rounded-[1.75rem] border border-zinc-200 bg-white shadow-2xl shadow-black/20 dark:border-zinc-800 dark:bg-zinc-950">
+        <div className="flex items-start justify-between gap-4 border-b border-zinc-100 px-5 py-4 dark:border-zinc-800">
+          <div>
+            <p className="text-[11px] font-medium uppercase tracking-[0.24em] text-zinc-400 dark:text-zinc-500">
+              {isSpanish ? "Herramienta" : "Tool"}
+            </p>
+            <h2
+              id="get-video-title"
+              className="mt-1 text-2xl font-semibold tracking-tight text-zinc-950 dark:text-zinc-50"
+            >
+              Get Video
+            </h2>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label={isSpanish ? "Cerrar" : "Close"}
+            className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-zinc-500 transition hover:bg-zinc-100 hover:text-zinc-950 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-50"
+          >
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="p-5">
+          <div className="mb-5 grid grid-cols-2 rounded-full border border-zinc-200 bg-zinc-100 p-1 dark:border-zinc-800 dark:bg-zinc-900">
+            <button
+              type="button"
+              onClick={() => onModeChange("youtube")}
+              className={`h-10 rounded-full text-[13px] font-semibold transition ${
+                mode === "youtube"
+                  ? "bg-white text-zinc-950 shadow-sm dark:bg-zinc-100 dark:text-zinc-950"
+                  : "text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
+              }`}
+            >
+              YouTube URL
+            </button>
+            <button
+              type="button"
+              onClick={() => onModeChange("upload")}
+              className={`h-10 rounded-full text-[13px] font-semibold transition ${
+                mode === "upload"
+                  ? "bg-white text-zinc-950 shadow-sm dark:bg-zinc-100 dark:text-zinc-950"
+                  : "text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
+              }`}
+            >
+              {isSpanish ? "Subir video" : "Upload Video"}
+            </button>
+          </div>
+
+          {mode === "youtube" && isElectron ? (
+            <YouTubeImportControl ready={ready} onFile={onImportedFile} />
+          ) : (
+            <ProjectUploadCard
+              ready={ready}
+              dragging={dragging}
+              source={source}
+              pendingTranscript={pendingTranscript}
+              onFiles={onFiles}
+              inputId={inputId}
+              inputRef={inputRef}
+              onDraggingChange={onDraggingChange}
+            />
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ProjectCard({
   project,
   busy,
@@ -389,6 +516,10 @@ export default function ProjectsScreen({
   const [libraryFiles, setLibraryFiles] = useState<LibraryFileMeta[]>([]);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [showLibrary, setShowLibrary] = useState(false);
+  const [showGetVideo, setShowGetVideo] = useState(false);
+  const [getVideoMode, setGetVideoMode] = useState<"youtube" | "upload">(
+    isElectron ? "youtube" : "upload"
+  );
   const [processingElapsed, setProcessingElapsed] = useState(0);
   const isolation = useCrossOriginIsolated();
   const ready = isolation === "ready";
@@ -658,6 +789,21 @@ export default function ProjectsScreen({
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain bg-[radial-gradient(circle_at_top,_rgba(255,255,255,0.9),_rgba(245,245,245,0.95)_36%,_rgba(240,240,240,1))] dark:bg-[radial-gradient(circle_at_top,_rgba(30,30,30,0.98),_rgba(10,10,10,1)_46%)]">
+      <GetVideoOverlay
+        open={showGetVideo}
+        mode={getVideoMode}
+        ready={ready}
+        dragging={dragging}
+        source={source}
+        pendingTranscript={pendingTranscript}
+        inputId={inputId}
+        inputRef={inputRef}
+        onClose={() => setShowGetVideo(false)}
+        onModeChange={setGetVideoMode}
+        onFiles={handleFiles}
+        onDraggingChange={setDragging}
+        onImportedFile={(file, options) => handleImportedFile(file, "youtube", options)}
+      />
       <div className="mx-auto flex min-h-full w-full max-w-7xl flex-col gap-8 px-6 py-6 sm:px-8 lg:px-10">
         {!isElectron && (
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -707,11 +853,21 @@ export default function ProjectsScreen({
                   : "Upload a new video, or reopen a project you already processed."}
               </p>
             </div>
-            <div className="inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-white/80 px-4 py-2 text-[13px] text-zinc-500 shadow-sm dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-400">
-              <span className="h-2 w-2 rounded-full bg-emerald-500" />
-              {isSpanish
-                ? `${projects.length} proyectos guardados`
-                : `${projects.length} saved projects`}
+            <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+              <div className="inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-white/80 px-4 py-2 text-[13px] text-zinc-500 shadow-sm dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-400">
+                <span className="h-2 w-2 rounded-full bg-emerald-500" />
+                {isSpanish
+                  ? `${projects.length} proyectos guardados`
+                  : `${projects.length} saved projects`}
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowGetVideo(true)}
+                className="inline-flex h-10 items-center justify-center gap-2 rounded-full bg-zinc-950 px-4 text-[13px] font-semibold text-white shadow-sm transition hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-white"
+              >
+                <Upload size={15} />
+                Get Video
+              </button>
             </div>
           </div>
         </section>
@@ -825,25 +981,6 @@ export default function ProjectsScreen({
             </div>
           </section>
         )}
-
-        <section className="space-y-4">
-          <h2 className="text-2xl font-semibold tracking-tight text-zinc-950 dark:text-zinc-50">
-            {isSpanish ? "Iniciar proyecto" : "Start project"}
-          </h2>
-          <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
-              {isElectron && <YouTubeImportControl ready={ready} onFile={(file, options) => handleImportedFile(file, "youtube", options)} />}
-            <ProjectUploadCard
-              ready={ready}
-              dragging={dragging}
-              source={source}
-              pendingTranscript={pendingTranscript}
-              onFiles={handleFiles}
-              inputId={inputId}
-              inputRef={inputRef}
-              onDraggingChange={setDragging}
-            />
-          </div>
-        </section>
 
         <section className="space-y-4">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">

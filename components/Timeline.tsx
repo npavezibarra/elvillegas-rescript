@@ -183,21 +183,12 @@ export default function Timeline() {
     const timing = renderLayerTiming(captionLayer, duration);
     return Math.max(transcriptScopeEnd, timing.end);
   }, [clipScoped, duration, layers, transcriptScopeEnd]);
-  const scopedPostRollEnd = useMemo(() => {
-    if (!clipScoped) return captionScopeEnd;
-    return layers.reduce((end, layer) => {
-      if (layer.type !== "image" || !layer.postRoll) return end;
-      const timing = renderLayerTiming(layer, duration);
-      if (timing.start < captionScopeEnd - 0.001) return end;
-      return Math.max(end, timing.end);
-    }, captionScopeEnd);
-  }, [captionScopeEnd, clipScoped, duration, layers]);
   const optionalAreaStart = clipScoped
-    ? scopedPostRollEnd
+    ? transcriptScopeEnd
     : Math.max(captionScopeEnd, compositionDuration);
-  // The optional area belongs to the current clip scope. It is intentionally
-  // outside the source-media range, so adding an end card never changes the
-  // boundaries used by cuts, words, or clip selection.
+  // A clip is a hard local composition boundary, plus its own short optional
+  // ending area for Add image. Never widen it to the source video's full
+  // duration or to unrelated post-roll elsewhere in the project.
   const timelineEnd = optionalAreaStart + OPTIONAL_EXTENSION_SECONDS;
   const timelineDuration = Math.max(0, timelineEnd - timelineStart);
   const scopeKey = `${clipScoped ? "clip" : "video"}:${timelineStart.toFixed(4)}:${scopeEnd.toFixed(4)}`;
@@ -678,8 +669,8 @@ export default function Timeline() {
 
       const t = timeFromClientX(e.clientX);
       const clip = clips.find((c) => t >= c.start && t < c.end);
-      // Seeking inside a focused clip, including its optional layer extension,
-      // must not return the timeline to the full-video viewport.
+      // Seeking inside a focused clip must not return the timeline to the
+      // full-video viewport.
       const staysInFocusedScope =
         focusedClip !== null &&
         t >= focusedClip.start &&
@@ -818,7 +809,12 @@ export default function Timeline() {
   }, []);
 
   const skip = useCallback((delta: number) => {
-    const { videoEl, setCurrentTime, selectedClipIndex } = useEditorStore.getState();
+    const {
+      activeClipRange,
+      videoEl,
+      setCurrentTime,
+      selectedClipIndex,
+    } = useEditorStore.getState();
     if (!videoEl) return;
     const cuts = getCutRanges(
       useEditorStore.getState().words,
@@ -831,8 +827,8 @@ export default function Timeline() {
       useEditorStore.getState().sceneBoundaries,
       selectedClipIndex
     );
-    const minTime = selectedClip?.start ?? 0;
-    const maxTime = selectedClip?.end ?? videoEl.duration;
+    const minTime = activeClipRange?.start ?? selectedClip?.start ?? 0;
+    const maxTime = activeClipRange?.end ?? selectedClip?.end ?? videoEl.duration;
     const t = Math.min(Math.max(minTime, videoEl.currentTime + delta), maxTime);
     videoEl.currentTime = t;
     setCurrentTime(t);
@@ -1020,11 +1016,12 @@ export default function Timeline() {
                 zoom === 1 &&
                 scrollLeft <= 1 &&
                 !focusedClip &&
+                !activeClipRange &&
                 !selectedClipSegment &&
                 !(aiClipPreviewRange && selectedClipIndex != null)
               }
               title={
-                focusedClip || selectedClipSegment
+                activeClipRange || focusedClip || selectedClipSegment
                   ? t("timeline.fitClip")
                   : t("timeline.fit")
               }
@@ -1032,7 +1029,7 @@ export default function Timeline() {
             >
               <Maximize2 size={13} />
               <span className="hidden text-[11px] font-medium xl:inline">
-                {focusedClip || selectedClipSegment
+                {activeClipRange || focusedClip || selectedClipSegment
                   ? t("timeline.fitClip")
                   : t("timeline.fit")}
               </span>

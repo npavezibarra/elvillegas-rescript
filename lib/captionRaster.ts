@@ -320,10 +320,10 @@ function drawCaptionWord(
   context.translate(item.x, item.y);
   if (active) context.scale(1.03, 1.03);
   if (active) {
-    context.shadowColor = "rgba(251, 191, 36, 0.18)";
-    context.shadowBlur = 24 * options.scale;
+    context.shadowColor = "transparent";
+    context.shadowBlur = 0;
     context.shadowOffsetX = 0;
-    context.shadowOffsetY = 10 * options.scaleY;
+    context.shadowOffsetY = 0;
     context.fillStyle = ACTIVE_BACKGROUND;
     roundedRect(
       context,
@@ -341,7 +341,7 @@ function drawCaptionWord(
   }
   context.fillStyle = active ? ACTIVE_TEXT : options.color;
   context.globalAlpha = active ? 1 : 0.95;
-  if (options.dropShadow) {
+  if (!active && options.dropShadow) {
     context.shadowColor = "rgba(0, 0, 0, 0.95)";
     context.shadowBlur = 6 * options.scale;
     context.shadowOffsetX = 0;

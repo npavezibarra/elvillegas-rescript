@@ -108,9 +108,10 @@ export default function CaptionOverlay({
             return (
               <span
                 key={word.id}
+                style={highlighted ? { textShadow: "none" } : undefined}
                 className={`caption-word rounded-md px-1.5 py-0.5 transition-all duration-150 ${
                   highlighted
-                    ? "caption-word-active scale-[1.03] bg-amber-300 text-zinc-950 shadow-[0_0_0_1px_rgba(255,255,255,0.18),0_10px_24px_rgba(251,191,36,0.18)]"
+                    ? "caption-word-active scale-[1.03] bg-amber-300 text-zinc-950"
                     : "opacity-95"
                 }`}
               >
